@@ -1,0 +1,22 @@
+{
+  "name": "cook",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently \"npm run electron\" \"npm run react\"",
+    "electron": "wait-on http://localhost:5173 && electron .",
+    "react": "cd frontend && npm run dev",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "concurrently": "^9.2.0",
+    "electron": "^37.2.4",
+    "wait-on": "^8.0.4"
+  }
+}
