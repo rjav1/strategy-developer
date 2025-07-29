@@ -67,6 +67,11 @@ class BacktestResult(BaseModel):
     equity_curve: List[float]
     trade_log: List[Dict]
 
+class ScreenResult(BaseModel):
+    symbol: str
+    value: float
+    name: Optional[str] = None
+
 def get_cache_key(symbol: str, range_param: str) -> str:
     return f"{symbol}_{range_param}"
 
@@ -275,6 +280,127 @@ async def get_result(result_id: str):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# Screening endpoints
+@app.get("/screen/high_momentum", response_model=List[ScreenResult])
+async def screen_high_momentum(
+    period: str = Query("3mo", regex="^(1d|5d|1mo|3mo|6mo|1y|5y|max)$", description="Historical data period"),
+    top_n: int = Query(10, description="Number of top momentum stocks to return")
+):
+    """
+    Screen stocks for high momentum based on price change over specified period.
+    
+    Args:
+        symbols: List of ticker symbols to screen
+        period: Time period for data (1d, 5d, 1mo, 3mo, 6mo, 1y, 5y, max)
+        top_n: Number of top momentum stocks to return
+    
+    Returns:
+        List of ScreenResult objects sorted by momentum (descending)
+    """
+    # Major US stocks to screen
+    major_stocks = [
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'BRK-B', 'JPM', 'V',
+        'JNJ', 'PG', 'UNH', 'HD', 'MA', 'DIS', 'PYPL', 'BAC', 'ADBE', 'CRM',
+        'NFLX', 'INTC', 'PFE', 'ABT', 'KO', 'PEP', 'TMO', 'ABBV', 'MRK', 'AVGO',
+        'WMT', 'COST', 'ACN', 'DHR', 'LLY', 'NEE', 'TXN', 'HON', 'UNP', 'RTX',
+        'QCOM', 'LOW', 'UPS', 'INTU', 'SPGI', 'TGT', 'ISRG', 'SBUX', 'GILD', 'ADI',
+        'AMGN', 'MDLZ', 'REGN', 'VRTX', 'KLAC', 'PANW', 'SNPS', 'CDNS', 'MU', 'ORCL'
+    ]
+    
+    results = []
+    
+    for symbol in major_stocks:
+        try:
+            ticker = yf.Ticker(symbol.upper())
+            hist = ticker.history(period=period)
+            
+            if hist.empty or len(hist) < 2:
+                continue
+                
+            start_price = hist['Close'].iloc[0]
+            end_price = hist['Close'].iloc[-1]
+            
+            if start_price <= 0:
+                continue
+                
+            momentum = (end_price - start_price) / start_price
+            info = ticker.info
+            name = info.get('longName', info.get('shortName', symbol.upper())) if info else symbol.upper()
+            
+            results.append(ScreenResult(
+                symbol=symbol.upper(), 
+                value=float(momentum),
+                name=name
+            ))
+            
+        except Exception as e:
+            print(f"Error processing {symbol}: {str(e)}")
+            continue
+    
+    # Sort by momentum (descending) and return top_n results
+    sorted_results = sorted(results, key=lambda x: x.value, reverse=True)
+    return sorted_results[:top_n]
+
+@app.get("/screen/low_volatility", response_model=List[ScreenResult])
+async def screen_low_volatility(
+    period: str = Query("3mo", regex="^(1d|5d|1mo|3mo|6mo|1y|5y|max)$", description="Historical data period"),
+    top_n: int = Query(10, description="Number of lowest volatility stocks to return")
+):
+    """
+    Screen stocks for low volatility based on standard deviation of returns.
+    
+    Args:
+        symbols: List of ticker symbols to screen
+        period: Time period for data (1d, 5d, 1mo, 3mo, 6mo, 1y, 5y, max)
+        top_n: Number of lowest volatility stocks to return
+    
+    Returns:
+        List of ScreenResult objects sorted by volatility (ascending)
+    """
+    # Major US stocks to screen
+    major_stocks = [
+        'AAPL', 'PLTR', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'BRK-B', 'JPM', 'V',
+        'JNJ', 'PG', 'UNH', 'HD', 'MA', 'DIS', 'PYPL', 'BAC', 'ADBE', 'CRM',
+        'NFLX', 'INTC', 'PFE', 'ABT', 'KO', 'PEP', 'TMO', 'ABBV', 'MRK', 'AVGO',
+        'WMT', 'COST', 'ACN', 'DHR', 'LLY', 'NEE', 'TXN', 'HON', 'UNP', 'RTX',
+        'QCOM', 'LOW', 'UPS', 'INTU', 'SPGI', 'TGT', 'ISRG', 'SBUX', 'GILD', 'ADI',
+        'AMGN', 'MDLZ', 'REGN', 'VRTX', 'KLAC', 'PANW', 'SNPS', 'CDNS', 'MU', 'ORCL'
+    ]
+    
+    results = []
+    
+    for symbol in major_stocks:
+        try:
+            ticker = yf.Ticker(symbol.upper())
+            hist = ticker.history(period=period)
+            
+            if hist.empty or len(hist) < 2:
+                continue
+                
+            # Calculate daily returns and volatility
+            returns = hist['Close'].pct_change().dropna()
+            
+            if len(returns) < 5:  # Need at least 5 data points for meaningful volatility
+                continue
+                
+            volatility = returns.std()
+            info = ticker.info
+            name = info.get('longName', info.get('shortName', symbol.upper())) if info else symbol.upper()
+            
+            results.append(ScreenResult(
+                symbol=symbol.upper(), 
+                value=float(volatility),
+                name=name
+            ))
+            
+        except Exception as e:
+            print(f"Error processing {symbol}: {str(e)}")
+            continue
+    
+    # Sort by volatility (ascending) and return top_n results
+    sorted_results = sorted(results, key=lambda x: x.value)
+    return sorted_results[:top_n]
 
 if __name__ == "__main__":
     import uvicorn
