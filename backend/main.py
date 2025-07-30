@@ -312,12 +312,189 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     true_range = ranges.max(axis=1)
     return true_range.rolling(window=period).mean()
 
-def check_momentum_pattern(hist_data: pd.DataFrame) -> tuple[bool, MomentumCriteria, float]:
+def check_momentum_pattern(hist_data: pd.DataFrame) -> tuple[bool, dict, float]:
     """
-    Implement the "5 Star Trading Setup/Pattern Checklist" for momentum analysis.
+    Implement the updated "5 Star Trading Setup/Pattern Checklist" with 9 criteria.
     Returns: (pattern_found, criteria_details, confidence_score)
     """
-    return check_momentum_pattern_custom(hist_data)
+    if len(hist_data) < 50:  # Need sufficient data for analysis
+        return False, {}, 0.0
+    
+    df = hist_data.copy()
+    df['SMA10'] = df['Close'].rolling(window=10).mean()
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    df['ATR'] = calculate_atr(df)
+    
+    # Calculate daily ranges and volume metrics
+    df['daily_range_pct'] = (df['High'] - df['Low']) / df['Open'] * 100
+    df['body_size_pct'] = abs(df['Close'] - df['Open']) / df['Open'] * 100
+    df['volume_sma'] = df['Volume'].rolling(window=20).mean()
+    
+    criteria_met = {}
+    criteria_details = {}
+    
+    # Criterion 1: Large percentage move within last 30 days (25-35% range)
+    if len(df) >= 30:
+        last_30_days = df.tail(30)
+        start_price = last_30_days['Close'].iloc[0]
+        end_price = last_30_days['Close'].iloc[-1]
+        move_pct = ((end_price - start_price) / start_price) * 100 if start_price > 0 else 0
+        
+        criteria_met['criterion1'] = 25 <= move_pct <= 35
+        criteria_details['criterion1'] = {
+            'met': criteria_met['criterion1'],
+            'move_pct': round(move_pct, 2),
+            'description': f"Large move: {move_pct:.1f}% in last 30 days (need 25-35%)"
+        }
+    else:
+        criteria_met['criterion1'] = False
+        criteria_details['criterion1'] = {
+            'met': False,
+            'move_pct': 0,
+            'description': "Insufficient data for 30-day analysis"
+        }
+    
+    # Criteria 2 & 3: Consolidation with volume and range analysis
+    # Look for 3-20+ days of consolidation with lower volume and range
+    consolidation_found = False
+    consol_days = 0
+    avg_range_during_consol = 0
+    volume_ratio = 0
+    
+    for days in range(3, min(21, len(df))):
+        recent_data = df.tail(days)
+        
+        # Check if range is tight (ADR between 3-20%)
+        avg_range = recent_data['daily_range_pct'].mean()
+        if 3 <= avg_range <= 20:
+            # Check if volume is below average
+            avg_volume = recent_data['volume_sma'].mean()
+            current_volume = recent_data['Volume'].mean()
+            vol_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+            
+            # Check if body sizes are smaller (closer open/close)
+            avg_body = recent_data['body_size_pct'].mean()
+            
+            if vol_ratio < 0.8 and avg_body < avg_range * 0.6:  # Volume 20% below avg, body 60% of range
+                consolidation_found = True
+                consol_days = days
+                avg_range_during_consol = avg_range
+                volume_ratio = vol_ratio
+                break
+    
+    criteria_met['criterion2_3'] = consolidation_found
+    criteria_details['criterion2_3'] = {
+        'met': consolidation_found,
+        'consol_days': consol_days,
+        'avg_range': round(avg_range_during_consol, 2),
+        'volume_ratio': round(volume_ratio, 2),
+        'description': f"Consolidation: {consol_days} days, {avg_range_during_consol:.1f}% range, {volume_ratio:.2f}x volume"
+    }
+    
+    # Criterion 4: MA10 tolerance (3-4% above or below)
+    if len(df) >= 10:
+        current_price = df['Close'].iloc[-1]
+        ma10 = df['SMA10'].iloc[-1]
+        
+        if not pd.isna(ma10) and ma10 > 0:
+            deviation_pct = abs(current_price - ma10) / ma10 * 100
+            criteria_met['criterion4'] = deviation_pct <= 4
+            criteria_details['criterion4'] = {
+                'met': criteria_met['criterion4'],
+                'deviation_pct': round(deviation_pct, 2),
+                'description': f"MA10 proximity: {deviation_pct:.1f}% from MA10 (need ≤4%)"
+            }
+        else:
+            criteria_met['criterion4'] = False
+            criteria_details['criterion4'] = {
+                'met': False,
+                'deviation_pct': 100,
+                'description': "MA10 not available"
+            }
+    else:
+        criteria_met['criterion4'] = False
+        criteria_details['criterion4'] = {
+            'met': False,
+            'deviation_pct': 100,
+            'description': "Insufficient data for MA10"
+        }
+    
+    # Criterion 7: Reconsolidation after breakout
+    # Check if there's a period of lower volume after a volume spike
+    reconsol_found = False
+    if len(df) >= 10:
+        recent_volumes = df['Volume'].tail(10)
+        recent_volume_sma = df['volume_sma'].tail(10)
+        
+        # Look for pattern: high volume followed by lower volume
+        for i in range(5, len(recent_volumes)):
+            if (recent_volumes.iloc[i-1] > recent_volume_sma.iloc[i-1] * 1.5 and  # Volume spike
+                recent_volumes.iloc[i] < recent_volume_sma.iloc[i] * 0.8):  # Lower volume
+                reconsol_found = True
+                break
+    
+    criteria_met['criterion7'] = reconsol_found
+    criteria_details['criterion7'] = {
+        'met': reconsol_found,
+        'description': "Reconsolidation after breakout: " + ("Found" if reconsol_found else "Not found")
+    }
+    
+    # Criterion 8: Linear and orderly moves
+    if len(df) >= 20:
+        recent_prices = df['Close'].tail(20)
+        time_series = np.arange(len(recent_prices))
+        
+        # Calculate R-squared for linearity
+        correlation = np.corrcoef(time_series, recent_prices)[0, 1] if len(recent_prices) > 1 else 0
+        r_squared = correlation ** 2 if not np.isnan(correlation) else 0
+        
+        criteria_met['criterion8'] = r_squared >= 0.6  # Dynamic threshold
+        criteria_details['criterion8'] = {
+            'met': criteria_met['criterion8'],
+            'r_squared': round(r_squared, 3),
+            'description': f"Linear moves: R² = {r_squared:.3f} (need ≥0.6)"
+        }
+    else:
+        criteria_met['criterion8'] = False
+        criteria_details['criterion8'] = {
+            'met': False,
+            'r_squared': 0,
+            'description': "Insufficient data for linearity analysis"
+        }
+    
+    # Criterion 9: Avoid barcode patterns
+    if len(df) >= 20:
+        recent_ranges = df['daily_range_pct'].tail(20)
+        avg_range = recent_ranges.mean()
+        range_std = recent_ranges.std()
+        
+        # Barcode patterns have high volatility and erratic ranges
+        # Check if average range is reasonable and not too volatile
+        criteria_met['criterion9'] = avg_range <= 15 and range_std <= 8
+        criteria_details['criterion9'] = {
+            'met': criteria_met['criterion9'],
+            'avg_range': round(avg_range, 2),
+            'range_std': round(range_std, 2),
+            'description': f"Smooth moves: avg range {avg_range:.1f}%, std {range_std:.1f}%"
+        }
+    else:
+        criteria_met['criterion9'] = False
+        criteria_details['criterion9'] = {
+            'met': False,
+            'avg_range': 100,
+            'range_std': 100,
+            'description': "Insufficient data for volatility analysis"
+        }
+    
+    # Calculate total criteria met (excluding 5 and 6)
+    total_criteria = 6  # 1, 2&3, 4, 7, 8, 9
+    criteria_met_count = sum(criteria_met.values())
+    confidence_score = (criteria_met_count / total_criteria) * 100
+    
+    # Pattern found if at least 4 out of 6 criteria met
+    pattern_found = criteria_met_count >= 4
+    
+    return pattern_found, criteria_details, confidence_score
 
 def check_momentum_pattern_custom(
     hist_data: pd.DataFrame,
@@ -825,93 +1002,66 @@ class ScreeningRequest(BaseModel):
 @app.post("/screen_momentum", response_model=List[ScreenResult])
 async def screen_momentum(request: ScreeningRequest):
     """
-    Screen stocks for momentum patterns using dynamic 9-criteria system.
+    Screen stocks for momentum patterns using updated 9-criteria system.
     
-    This endpoint implements a sophisticated momentum screening system that focuses on:
-    1. Large percentage moves over specified timeframes
-    2. Consolidation patterns with volume and range analysis  
-    3. Moving average proximity
-    4. Reconsolidation behavior after breakouts
-    5. Linear price movement analysis
-    6. Barcode pattern avoidance
+    This endpoint implements the "5 Star Trading Setup/Pattern Checklist" with:
+    1. Large percentage move within last 30 days (25-35% range)
+    2&3. Consolidation pattern with volume and range analysis
+    4. MA10 tolerance (3-4% above or below)
+    7. Reconsolidation after breakout
+    8. Linear and orderly moves
+    9. Avoid barcode patterns
     
-    Consolidation detection emphasizes:
-    - Drop in volume during tight range periods
-    - Lower ADR (Average Daily Range) percentage between 3-20%
-    - Stability with candles having closer open/closing ranges
+    Criteria 5 and 6 have been removed as requested.
     """
     results = []
     
     for symbol in request.symbols:
         try:
-            # Clean symbol - remove special characters
+            # Clean symbol
             clean_symbol = symbol.replace('$', '').replace('/', '').replace('-', '').upper().strip()
             if not clean_symbol or len(clean_symbol) > 6:
                 continue
                 
-            # Fetch OHLCV data
-            try:
-                df = fetch_ohlcv(clean_symbol, request.criteria.days_large_move)
-            except ValueError as e:
-                print(f"Skipping {clean_symbol}: {str(e)}")
+            # Fetch data
+            ticker = yf.Ticker(clean_symbol)
+            hist = ticker.history(period="3mo")  # 3 months for analysis
+            
+            if hist.empty or len(hist) < 50:
                 continue
             
-            # Initialize criteria results dictionary
-            criteria_met = {}
+            # Run momentum analysis using updated function
+            pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist)
             
-            # Criterion 1: Large percentage move in specified timeframe
-            criteria_met["large_move"] = check_large_move(df, request.criteria.pct_large_move)
-            
-            # Criteria 2 & 3: Consolidation pattern with volume and range constraints
-            criteria_met["consolidation"] = find_consolidation_pattern(
-                df,
-                request.criteria.min_consol_days,
-                request.criteria.max_consol_days,
-                request.criteria.max_range_pct,
-                request.criteria.below_avg_volume,
-                request.criteria.below_avg_range
-            )
-            
-            # Criterion 4: MA10 tolerance - price near 10-day moving average
-            criteria_met["ma10_tolerance"] = check_ma10_tolerance(df, request.criteria.ma10_tolerance_pct)
-            
-            # Criterion 7: Reconsolidation after breakout with controlled volume
-            criteria_met["reconsolidation"] = check_reconsolidation(
-                df, 
-                request.criteria.reconsol_days, 
-                request.criteria.reconsol_volume_pct
-            )
-            
-            # Criterion 8: Linear price movement (high R² correlation)
-            r2_value = compute_linear_r2(df)
-            criteria_met["linear_moves"] = r2_value >= request.criteria.linear_r2_threshold
-            
-            # Criterion 9: Avoid barcode patterns (low average range)
-            criteria_met["avoid_barcode"] = check_avoid_barcode_pattern(
-                df, 
-                request.criteria.avoid_barcode_max_avgrange
-            )
-            
-            # Calculate total criteria met
-            total_met = sum(criteria_met.values())
-            
-            # Determine pattern strength based on criteria met
-            if total_met >= 5:
-                strength = "Strong"
-            elif total_met >= 3:
-                strength = "Moderate"
-            else:
-                strength = "Weak"
-            
-            # Get company name (optional)
+            # Get company name
             try:
-                ticker = yf.Ticker(clean_symbol)
                 info = ticker.info
                 company_name = info.get('longName', info.get('shortName', clean_symbol)) if info else clean_symbol
             except:
                 company_name = clean_symbol
             
-            # Create result object
+            # Determine pattern strength
+            if confidence_score >= 80:
+                strength = "Strong"
+            elif confidence_score >= 60:
+                strength = "Moderate"
+            elif confidence_score >= 40:
+                strength = "Weak"
+            else:
+                strength = "Very Weak"
+            
+            # Create criteria met dictionary
+            criteria_met = {
+                'large_move': criteria_details.get('criterion1', {}).get('met', False),
+                'consolidation': criteria_details.get('criterion2_3', {}).get('met', False),
+                'ma10_tolerance': criteria_details.get('criterion4', {}).get('met', False),
+                'reconsolidation': criteria_details.get('criterion7', {}).get('met', False),
+                'linear_moves': criteria_details.get('criterion8', {}).get('met', False),
+                'avoid_barcode': criteria_details.get('criterion9', {}).get('met', False)
+            }
+            
+            total_met = sum(criteria_met.values())
+            
             result = ScreenResult(
                 symbol=clean_symbol,
                 criteria_met=criteria_met,
@@ -926,14 +1076,14 @@ async def screen_momentum(request: ScreeningRequest):
             print(f"Error processing {symbol}: {str(e)}")
             continue
     
-    # Sort by total criteria met (descending) and return results
-    sorted_results = sorted(results, key=lambda x: x.total_met, reverse=True)
+    # Sort by total criteria met and confidence
+    sorted_results = sorted(results, key=lambda x: (x.total_met, x.pattern_strength), reverse=True)
     return sorted_results
 
 @app.get("/analyze/momentum_pattern/{symbol}", response_model=MomentumAnalysisResult)
 async def analyze_momentum_pattern(
     symbol: str,
-    period: str = Query("1y", regex="^(3mo|6mo|1y|2y|5y|max)$", description="Historical data period for analysis")
+    period: str = Query("3mo", regex="^(3mo|6mo|1y|2y|5y|max)$", description="Historical data period for analysis")
 ):
     """
     Perform detailed momentum pattern analysis for a single symbol.
@@ -946,125 +1096,15 @@ async def analyze_momentum_pattern(
         if hist.empty or len(hist) < 100:
             raise HTTPException(status_code=404, detail=f"Insufficient historical data for analysis of '{symbol}'")
         
-        # Perform momentum pattern analysis using the new criteria structure
-        # Create criteria object for analysis
-        analysis_criteria = MomentumCriteria(
-            days_large_move=30,
-            pct_large_move=0.30,
-            min_consol_days=3,
-            max_consol_days=20,
-            max_range_pct=0.10,
-            below_avg_volume=True,
-            below_avg_range=True,
-            ma10_tolerance_pct=0.04,
-            reconsol_days=3,
-            reconsol_volume_pct=0.8,
-            linear_r2_threshold=0.7,
-            avoid_barcode_max_avgrange=0.05
-        )
-        
-        # Use the new screening functions
-        df = hist.copy()
-        df["range_pct"] = (df["High"] - df["Low"]) / df["Open"]
-        df["range_pct"] = df["range_pct"].fillna(0)
-        
-        # Check each criterion with detailed analysis
-        criteria_met = {}
-        criteria_details = {}
-        
-        # Criterion 1: Large Move
-        start_price = df["Close"].iloc[0]
-        end_price = df["Close"].iloc[-1]
-        total_move_pct = (end_price - start_price) / start_price if start_price > 0 else 0
-        criteria_met["large_move"] = total_move_pct >= analysis_criteria.pct_large_move
-        criteria_details["large_move"] = {
-            "met": criteria_met["large_move"],
-            "actual": total_move_pct * 100,
-            "required": analysis_criteria.pct_large_move * 100,
-            "explanation": f"Price moved {total_move_pct*100:.1f}% from ${start_price:.2f} to ${end_price:.2f}. Required: {analysis_criteria.pct_large_move*100:.0f}%"
-        }
-        
-        # Criterion 2: Consolidation
-        consolidation_result = find_consolidation_pattern(
-            df, analysis_criteria.min_consol_days, analysis_criteria.max_consol_days,
-            analysis_criteria.max_range_pct, analysis_criteria.below_avg_volume, 
-            analysis_criteria.below_avg_range
-        )
-        criteria_met["consolidation"] = consolidation_result
-        recent_range_avg = df["range_pct"].tail(10).mean() * 100
-        criteria_details["consolidation"] = {
-            "met": consolidation_result,
-            "actual": recent_range_avg,
-            "required": analysis_criteria.max_range_pct * 100,
-            "explanation": f"Recent average range: {recent_range_avg:.1f}%. Required: <{analysis_criteria.max_range_pct*100:.1f}% with volume/range constraints"
-        }
-        
-        # Criterion 3: MA10 Tolerance
-        ma10 = df["Close"].rolling(window=10).mean().iloc[-1]
-        last_close = df["Close"].iloc[-1]
-        ma10_deviation = abs(last_close - ma10) / ma10 if ma10 > 0 else 1
-        criteria_met["ma10_tolerance"] = ma10_deviation <= analysis_criteria.ma10_tolerance_pct
-        criteria_details["ma10_tolerance"] = {
-            "met": criteria_met["ma10_tolerance"],
-            "actual": ma10_deviation * 100,
-            "required": analysis_criteria.ma10_tolerance_pct * 100,
-            "explanation": f"Price ${last_close:.2f} is {ma10_deviation*100:.1f}% from MA10 (${ma10:.2f}). Required: <{analysis_criteria.ma10_tolerance_pct*100:.1f}%"
-        }
-        
-        # Criterion 4: Reconsolidation
-        reconsol_result = check_reconsolidation(
-            df, analysis_criteria.reconsol_days, analysis_criteria.reconsol_volume_pct
-        )
-        criteria_met["reconsolidation"] = reconsol_result
-        if len(df) >= analysis_criteria.reconsol_days + 2:
-            breakout_volume = df["Volume"].iloc[-(analysis_criteria.reconsol_days + 1)]
-            recent_vol_avg = df["Volume"].tail(analysis_criteria.reconsol_days).mean()
-            vol_ratio = recent_vol_avg / breakout_volume if breakout_volume > 0 else 1
-            criteria_details["reconsolidation"] = {
-                "met": reconsol_result,
-                "actual": vol_ratio,
-                "required": analysis_criteria.reconsol_volume_pct,
-                "explanation": f"Recent volume ratio: {vol_ratio:.2f}. Required: <{analysis_criteria.reconsol_volume_pct:.2f} (lower volume after breakout)"
-            }
-        else:
-            criteria_details["reconsolidation"] = {
-                "met": False,
-                "actual": 0,
-                "required": analysis_criteria.reconsol_volume_pct,
-                "explanation": "Insufficient data for reconsolidation analysis"
-            }
-        
-        # Criterion 5: Linear Moves
-        r2_value = compute_linear_r2(df)
-        criteria_met["linear_moves"] = r2_value >= analysis_criteria.linear_r2_threshold
-        criteria_details["linear_moves"] = {
-            "met": criteria_met["linear_moves"],
-            "actual": r2_value,
-            "required": analysis_criteria.linear_r2_threshold,
-            "explanation": f"Price linearity R²: {r2_value:.3f}. Required: ≥{analysis_criteria.linear_r2_threshold:.3f}"
-        }
-        
-        # Criterion 6: Avoid Barcode
-        avg_range_pct = df["range_pct"].mean() * 100
-        criteria_met["avoid_barcode"] = avg_range_pct <= analysis_criteria.avoid_barcode_max_avgrange * 100
-        criteria_details["avoid_barcode"] = {
-            "met": criteria_met["avoid_barcode"],
-            "actual": avg_range_pct,
-            "required": analysis_criteria.avoid_barcode_max_avgrange * 100,
-            "explanation": f"Average range: {avg_range_pct:.1f}%. Required: <{analysis_criteria.avoid_barcode_max_avgrange*100:.1f}% (avoid erratic moves)"
-        }
-        
-        # Count total criteria met
-        total_criteria_met = sum(criteria_met.values())
-        confidence_score = (total_criteria_met / 6) * 100  # 6 criteria total
-        pattern_found = total_criteria_met >= 3  # At least 3 criteria met
+        # Run updated momentum analysis
+        pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist)
         
         # Determine pattern strength
-        if confidence_score >= 90:
+        if confidence_score >= 80:
             strength = "Strong"
-        elif confidence_score >= 70:
+        elif confidence_score >= 60:
             strength = "Moderate"
-        elif confidence_score >= 50:
+        elif confidence_score >= 40:
             strength = "Weak"
         else:
             strength = "Very Weak"
@@ -1074,40 +1114,49 @@ async def analyze_momentum_pattern(
 MOMENTUM PATTERN ANALYSIS - {symbol.upper()}
 Pattern Status: {'FOUND' if pattern_found else 'NOT FOUND'} ({confidence_score:.1f}% confidence)
 Pattern Strength: {strength}
-Criteria Met: {total_criteria_met}/6
 
 📊 DETAILED CRITERIA ANALYSIS:
 
-1. LARGE MOVE (30%+):
-   Status: {'✅ PASSED' if criteria_met['large_move'] else '❌ FAILED'}
-   {criteria_details['large_move']['explanation']}
+1. LARGE MOVE (25-35% in last 30 days):
+   Status: {'✅ PASSED' if criteria_details.get('criterion1', {}).get('met', False) else '❌ FAILED'}
+   {criteria_details.get('criterion1', {}).get('description', 'Analysis not available')}
 
-2. CONSOLIDATION PATTERN:
-   Status: {'✅ PASSED' if criteria_met['consolidation'] else '❌ FAILED'}
-   {criteria_details['consolidation']['explanation']}
+2&3. CONSOLIDATION PATTERN (Volume & Range Analysis):
+   Status: {'✅ PASSED' if criteria_details.get('criterion2_3', {}).get('met', False) else '❌ FAILED'}
+   {criteria_details.get('criterion2_3', {}).get('description', 'Analysis not available')}
 
-3. MA10 TOLERANCE:
-   Status: {'✅ PASSED' if criteria_met['ma10_tolerance'] else '❌ FAILED'}
-   {criteria_details['ma10_tolerance']['explanation']}
+4. MA10 TOLERANCE (3-4% proximity):
+   Status: {'✅ PASSED' if criteria_details.get('criterion4', {}).get('met', False) else '❌ FAILED'}
+   {criteria_details.get('criterion4', {}).get('description', 'Analysis not available')}
 
-4. RECONSOLIDATION:
-   Status: {'✅ PASSED' if criteria_met['reconsolidation'] else '❌ FAILED'}
-   {criteria_details['reconsolidation']['explanation']}
+7. RECONSOLIDATION AFTER BREAKOUT:
+   Status: {'✅ PASSED' if criteria_details.get('criterion7', {}).get('met', False) else '❌ FAILED'}
+   {criteria_details.get('criterion7', {}).get('description', 'Analysis not available')}
 
-5. LINEAR MOVES:
-   Status: {'✅ PASSED' if criteria_met['linear_moves'] else '❌ FAILED'}
-   {criteria_details['linear_moves']['explanation']}
+8. LINEAR AND ORDERLY MOVES:
+   Status: {'✅ PASSED' if criteria_details.get('criterion8', {}).get('met', False) else '❌ FAILED'}
+   {criteria_details.get('criterion8', {}).get('description', 'Analysis not available')}
 
-6. AVOID BARCODE:
-   Status: {'✅ PASSED' if criteria_met['avoid_barcode'] else '❌ FAILED'}
-   {criteria_details['avoid_barcode']['explanation']}
+9. AVOID BARCODE PATTERNS:
+   Status: {'✅ PASSED' if criteria_details.get('criterion9', {}).get('met', False) else '❌ FAILED'}
+   {criteria_details.get('criterion9', {}).get('description', 'Analysis not available')}
 
 📈 SUMMARY:
 This stock {'shows' if pattern_found else 'does not show'} {strength.lower()} momentum pattern characteristics 
-with {total_criteria_met} out of 6 criteria satisfied. 
+with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in [1, '2_3', 4, 7, 8, 9]])} out of 6 criteria satisfied.
 
 {'The pattern suggests potential continuation of the current trend based on the 5 Star Trading Setup methodology.' if pattern_found else 'Consider waiting for better setup conditions or look for alternative opportunities.'}
         """.strip()
+        
+        # Create criteria met dictionary first
+        criteria_met = {
+            'large_move': criteria_details.get('criterion1', {}).get('met', False),
+            'consolidation': criteria_details.get('criterion2_3', {}).get('met', False),
+            'ma10_tolerance': criteria_details.get('criterion4', {}).get('met', False),
+            'reconsolidation': criteria_details.get('criterion7', {}).get('met', False),
+            'linear_moves': criteria_details.get('criterion8', {}).get('met', False),
+            'avoid_barcode': criteria_details.get('criterion9', {}).get('met', False)
+        }
         
         # Generate interactive chart using Plotly
         chart_html = None
@@ -1306,13 +1355,15 @@ with {total_criteria_met} out of 6 criteria satisfied.
             print(f"Error generating interactive chart for {symbol}: {chart_error}")
             chart_html = None
         
+        total_criteria_met = sum(criteria_met.values())
+        
         return MomentumAnalysisResult(
             symbol=symbol.upper(),
             pattern_found=pattern_found,
             confidence_score=confidence_score,
             analysis_report=analysis_report,
             chart_image_base64=chart_html,  # Now contains HTML instead of base64
-            criteria_details=analysis_criteria,
+            criteria_details=None,  # Simplified for now
             total_criteria_met=total_criteria_met,
             pattern_strength=strength,
             criteria_met=criteria_met
