@@ -1,4 +1,12 @@
 fastapi
 uvicorn
 yfinance
-requests 
+requests
+pandas
+numpy
+matplotlib
+mplfinance
+ta
+scikit-learn
+plotly
+kaleido 
