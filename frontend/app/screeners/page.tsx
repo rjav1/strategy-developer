@@ -6,10 +6,10 @@ import StockChart from '../../components/StockChart'
 
 interface ScreenResult {
   symbol: string
-  value: number
+  criteria_met: Record<string, boolean>
+  total_met: number
+  pattern_strength: string
   name?: string
-  confidence_score?: number
-  pattern_strength?: string
 }
 
 interface StockData {
@@ -27,62 +27,27 @@ interface StockData {
 }
 
 interface MomentumCriteria {
-  criterion1_large_move: {
-    met: boolean
-    percentage_move: number
-    threshold: number
-    description: string
-  }
-  criterion2_consolidation: {
-    met: boolean
-    consolidation_days: number
-    range_percentage: number
-    description: string
-  }
-  criterion3_narrow_range: {
-    met: boolean
-    avg_range: number
-    atr: number
-    description: string
-  }
-  criterion4_moving_averages: {
-    met: boolean
-    above_sma10: boolean
-    above_sma20: boolean
-    above_sma50: boolean
-    ma_trending_up: boolean
-    description: string
-  }
-  criterion5_volume_breakout: {
-    met: boolean
-    volume_ratio: number
-    recent_volume: number
-    avg_volume: number
-    description: string
-  }
-  criterion6_close_at_hod: {
-    met: boolean
-    distance_from_hod_pct: number
-    close_price: number
-    high_of_day: number
-    description: string
-  }
-  criterion7_not_extended: {
-    met: boolean
-    distance_from_sma20: number
-    description: string
-  }
-  criterion8_linear_moves: {
-    met: boolean
-    correlation: number
-    description: string
-  }
-  criterion9_avoid_barcode: {
-    met: boolean
-    returns_std: number
-    avg_return: number
-    description: string
-  }
+  // Criterion 1: Large percentage move
+  days_large_move: number
+  pct_large_move: number
+
+  // Criteria 2 & 3: Consolidation pattern  
+  min_consol_days: number
+  max_consol_days: number
+  max_range_pct: number
+  below_avg_volume: boolean
+  below_avg_range: boolean
+
+  // Criterion 4: MA10 tolerance
+  ma10_tolerance_pct: number
+
+  // Criterion 7: Reconsolidation after breakout
+  reconsol_days: number
+  reconsol_volume_pct: number
+
+  // Criterion 8 & 9: Technical analysis
+  linear_r2_threshold: number
+  avoid_barcode_max_avgrange: number
 }
 
 interface MomentumAnalysisResult {
@@ -94,6 +59,7 @@ interface MomentumAnalysisResult {
   criteria_details: MomentumCriteria | null
   total_criteria_met: number
   pattern_strength: string
+  criteria_met?: Record<string, boolean>  // New field for individual criteria results
 }
 
 export default function Screeners() {
@@ -136,44 +102,67 @@ export default function Screeners() {
     setResults([])
     
     try {
-      let endpoint = type === 'momentum' ? '/screen/high_momentum' : '/screen/low_volatility'
-      let queryParams = new URLSearchParams({
-        period: period,
-        top_n: topN.toString()
-      })
-
       if (type === 'momentum') {
-        queryParams.append('min_criteria', minCriteria.toString())
-        queryParams.append('min_percentage_move', minPercentageMove.toString())
-        queryParams.append('max_consolidation_range', maxConsolidationRange.toString())
-        queryParams.append('narrow_range_multiplier', narrowRangeMultiplier.toString())
-        queryParams.append('volume_spike_threshold', volumeSpikeThreshold.toString())
-        queryParams.append('hod_distance_threshold', hodDistanceThreshold.toString())
-        queryParams.append('sma_distance_threshold', smaDistanceThreshold.toString())
-        queryParams.append('correlation_threshold', correlationThreshold.toString())
-        queryParams.append('volatility_threshold', volatilityThreshold.toString())
-        queryParams.append('require_all_sma', requireAllSma.toString())
-        queryParams.append('require_both_ma_trending', requireBothMaTrending.toString())
-        queryParams.append('fallback_enabled', fallbackEnabled.toString())
-        if (enabledCriteria.length < 9) {
-          queryParams.append('enabled_criteria', enabledCriteria.join(','))
+        // Use new momentum screening API
+        const symbols = customSymbols.trim() 
+          ? customSymbols.split(',').map(s => s.trim().toUpperCase())
+          : ['AAPL', 'MSFT', 'TSLA', 'NVDA', 'GOOGL', 'AMZN', 'META', 'NFLX', 'AMD', 'INTC']
+        
+        const requestBody = {
+          symbols: symbols,
+          criteria: {
+            days_large_move: 30,
+            pct_large_move: minPercentageMove / 100, // Convert percentage to decimal
+            min_consol_days: 3,
+            max_consol_days: 15,
+            max_range_pct: maxConsolidationRange / 100,
+            below_avg_volume: true,
+            below_avg_range: true,
+            ma10_tolerance_pct: 0.05,
+            reconsol_days: 3,
+            reconsol_volume_pct: 0.8,
+            linear_r2_threshold: correlationThreshold,
+            avoid_barcode_max_avgrange: volatilityThreshold
+          }
         }
-      }
 
-      if (customSymbols.trim()) {
-        queryParams.append('symbols', customSymbols.trim())
-      }
+        const response = await fetch('http://localhost:8000/screen_momentum', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody)
+        })
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
+        
+        const data = await response.json()
+        setResults(data)
+        generateAnalysis(data, type)
+        
+      } else {
+        // Use existing volatility screening API
+        let queryParams = new URLSearchParams({
+          period: period,
+          top_n: topN.toString()
+        })
 
-      const response = await fetch(`http://localhost:8000${endpoint}?${queryParams}`)
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        if (customSymbols.trim()) {
+          queryParams.append('symbols', customSymbols.trim())
+        }
+
+        const response = await fetch(`http://localhost:8000/screen/low_volatility?${queryParams}`)
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
+        
+        const data = await response.json()
+        setResults(data)
+        generateAnalysis(data, type)
       }
-      
-      const data = await response.json()
-      setResults(data)
-      
-      generateAnalysis(data, type)
       
     } catch (err) {
       setError(`Failed to run screener: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -184,24 +173,47 @@ export default function Screeners() {
   }
 
   const generateAnalysis = (data: ScreenResult[], type: 'momentum' | 'volatility') => {
-    const avgValue = data.reduce((sum, item) => sum + item.value, 0) / data.length
-    const maxValue = Math.max(...data.map(item => item.value))
-    const minValue = Math.min(...data.map(item => item.value))
-    
-    setAnalysisData({
-      type,
-      totalStocks: data.length,
-      averageValue: avgValue,
-      maxValue,
-      minValue,
-      topPerformer: data[0],
-      worstPerformer: data[data.length - 1],
-      positiveCount: type === 'momentum' ? data.filter(item => item.value > 0).length : 0,
-      negativeCount: type === 'momentum' ? data.filter(item => item.value < 0).length : 0,
-      strongPatterns: type === 'momentum' ? data.filter(item => item.pattern_strength === 'Strong').length : 0,
-      moderatePatterns: type === 'momentum' ? data.filter(item => item.pattern_strength === 'Moderate').length : 0,
-      weakPatterns: type === 'momentum' ? data.filter(item => item.pattern_strength === 'Weak').length : 0
-    })
+    if (type === 'momentum') {
+      // For momentum screening, use total_met as the value
+      const avgValue = data.reduce((sum, item) => sum + item.total_met, 0) / data.length
+      const maxValue = Math.max(...data.map(item => item.total_met))
+      const minValue = Math.min(...data.map(item => item.total_met))
+      
+      setAnalysisData({
+        type,
+        totalStocks: data.length,
+        averageValue: avgValue,
+        maxValue,
+        minValue,
+        topPerformer: data[0],
+        worstPerformer: data[data.length - 1],
+        positiveCount: data.filter(item => item.total_met >= 3).length,
+        negativeCount: data.filter(item => item.total_met < 3).length,
+        strongPatterns: data.filter(item => item.pattern_strength === 'Strong').length,
+        moderatePatterns: data.filter(item => item.pattern_strength === 'Moderate').length,
+        weakPatterns: data.filter(item => item.pattern_strength === 'Weak').length
+      })
+    } else {
+      // For volatility screening, use the original value property (if it exists)
+      const avgValue = data.reduce((sum, item) => sum + (item as any).value, 0) / data.length
+      const maxValue = Math.max(...data.map(item => (item as any).value))
+      const minValue = Math.min(...data.map(item => (item as any).value))
+      
+      setAnalysisData({
+        type,
+        totalStocks: data.length,
+        averageValue: avgValue,
+        maxValue,
+        minValue,
+        topPerformer: data[0],
+        worstPerformer: data[data.length - 1],
+        positiveCount: 0,
+        negativeCount: 0,
+        strongPatterns: 0,
+        moderatePatterns: 0,
+        weakPatterns: 0
+      })
+    }
   }
 
   const fetchStockData = async (symbol: string) => {
@@ -229,6 +241,13 @@ export default function Screeners() {
       }
       
       const data = await response.json()
+      console.log('Momentum analysis data received:', {
+        symbol: data.symbol,
+        hasChart: !!data.chart_image_base64,
+        chartLength: data.chart_image_base64?.length || 0,
+        criteriaMet: data.criteria_met,
+        chartPreview: data.chart_image_base64?.substring(0, 200) || 'No chart data'
+      })
       setMomentumAnalysis(data)
       
     } catch (err) {
@@ -238,10 +257,12 @@ export default function Screeners() {
     }
   }
 
-  const formatValue = (value: number, type: 'momentum' | 'volatility') => {
+  const formatValue = (result: ScreenResult, type: 'momentum' | 'volatility') => {
     if (type === 'momentum') {
-      return `${value.toFixed(1)}%`
+      return `${result.total_met}/6 criteria met`
     } else {
+      // For volatility, use the value property if it exists
+      const value = (result as any).value || 0
       return `${(value * 100).toFixed(2)}%`
     }
   }
@@ -266,9 +287,9 @@ export default function Screeners() {
     }
     
     if (type === 'momentum') {
-      return `Screened ${totalStocks} stocks using 5 Star Trading Setup criteria. Average confidence: ${averageValue.toFixed(1)}%. 
+      return `Screened ${totalStocks} stocks using 5 Star Trading Setup criteria. Average criteria met: ${averageValue.toFixed(1)}/6. 
       Pattern strength distribution: ${strongPatterns} Strong, ${moderatePatterns} Moderate, ${weakPatterns} Weak patterns found. 
-      Top performer: ${topPerformer.symbol} (${topPerformer.value.toFixed(1)}% confidence, ${topPerformer.pattern_strength} pattern).`
+      Top performer: ${topPerformer.symbol} (${topPerformer.total_met}/6 criteria met, ${topPerformer.pattern_strength} pattern).`
     } else {
       return `Screened ${totalStocks} stocks for volatility. Average volatility: ${(averageValue * 100).toFixed(2)}%. 
       Lowest volatility: ${topPerformer.symbol} (${(topPerformer.value * 100).toFixed(2)}%), 
@@ -656,10 +677,10 @@ export default function Screeners() {
                     <td className="p-3 text-muted-foreground">{result.name || result.symbol}</td>
                     <td className={`p-3 font-medium ${
                       screenerType === 'momentum' 
-                        ? result.value >= 90 ? 'text-green-400' : result.value >= 70 ? 'text-yellow-400' : 'text-orange-400'
+                        ? result.total_met >= 5 ? 'text-green-400' : result.total_met >= 3 ? 'text-yellow-400' : 'text-orange-400'
                         : 'text-blue-400'
                     }`}>
-                      {formatValue(result.value, screenerType!)}
+                      {formatValue(result, screenerType!)}
                     </td>
                     {screenerType === 'momentum' && (
                       <td className={`p-3 font-medium ${getPatternStrengthColor(result.pattern_strength || '')}`}>
@@ -765,48 +786,89 @@ export default function Screeners() {
                     </div>
                     <div className="p-4 bg-gray-800/50 rounded-lg">
                       <h3 className="text-sm font-medium text-muted-foreground mb-2">Criteria Met</h3>
-                      <p className="text-2xl font-bold text-white">{momentumAnalysis.total_criteria_met}/9</p>
+                      <p className="text-2xl font-bold text-white">{momentumAnalysis.total_criteria_met}/6</p>
                     </div>
                   </div>
 
-                  {/* Annotated Chart */}
+                  {/* Interactive Chart */}
                   {momentumAnalysis.chart_image_base64 && (
                     <div className="card-glow p-6">
-                      <h3 className="text-lg font-semibold text-white mb-4">Annotated Technical Analysis Chart</h3>
-                      <div className="bg-white rounded-lg p-4">
-                        <img 
-                          src={momentumAnalysis.chart_image_base64} 
-                          alt={`${momentumAnalysis.symbol} Momentum Analysis Chart`}
-                          className="w-full h-auto"
+                      <h3 className="text-lg font-semibold text-white mb-4">Interactive Technical Analysis Chart</h3>
+                      <div className="bg-gray-900 rounded-lg p-2 overflow-hidden">
+                        <iframe
+                          srcDoc={momentumAnalysis.chart_image_base64}
+                          className="w-full"
+                          style={{ 
+                            minHeight: '600px', 
+                            border: 'none',
+                            backgroundColor: 'transparent'
+                          }}
+                          title={`${momentumAnalysis.symbol} Momentum Analysis Chart`}
+                          sandbox="allow-scripts allow-same-origin"
                         />
+                        {/* Debug info */}
+                        <div className="text-xs text-gray-500 mt-2">
+                          Chart data length: {momentumAnalysis.chart_image_base64?.length || 0} characters
+                          {momentumAnalysis.chart_image_base64 && (
+                            <div>
+                              Preview: {momentumAnalysis.chart_image_base64.substring(0, 100)}...
+                            </div>
+                          )}
+                        </div>
                       </div>
                       <div className="mt-4 text-sm text-muted-foreground">
-                        <p>• Chart automatically annotates key momentum pattern elements</p>
-                        <p>• Moving averages, consolidation zones, breakout points, and volume spikes are highlighted</p>
+                        <p>• Interactive chart with SMA10, SMA20, and SMA50 moving averages</p>
+                        <p>• Hover over lines for detailed price information</p>
+                        <p>• Zoom, pan, and download chart functionality available</p>
+                        <p>• Green/red candlesticks show daily price action</p>
                       </div>
                     </div>
                   )}
 
                   {/* Criteria Breakdown */}
-                  {momentumAnalysis.criteria_details && (
+                  {momentumAnalysis.criteria_met && (
                     <div className="card-glow p-6">
                       <h3 className="text-lg font-semibold text-white mb-4">5 Star Trading Setup Criteria Analysis</h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {Object.entries(momentumAnalysis.criteria_details).map(([key, criterion], index) => (
-                          <div key={key} className={`p-4 rounded-lg border ${
-                            criterion.met ? 'bg-green-500/10 border-green-500/30' : 'bg-red-500/10 border-red-500/30'
-                          }`}>
-                            <div className="flex items-center gap-2 mb-2">
-                              {criterion.met ? (
-                                <CheckCircle className="h-5 w-5 text-green-400" />
-                              ) : (
-                                <XCircle className="h-5 w-5 text-red-400" />
-                              )}
-                              <h4 className="font-medium text-white">Criterion {index + 1}</h4>
+                        {Object.entries(momentumAnalysis.criteria_met).map(([key, met], index) => {
+                          const criterionNames = {
+                            'large_move': 'Large Move (30%+)',
+                            'consolidation': 'Consolidation Pattern',
+                            'ma10_tolerance': 'MA10 Tolerance',
+                            'reconsolidation': 'Reconsolidation',
+                            'linear_moves': 'Linear Moves',
+                            'avoid_barcode': 'Avoid Barcode'
+                          };
+                          const descriptions = {
+                            'large_move': 'Significant price move prior to consolidation',
+                            'consolidation': 'Tight range with volume/range constraints',
+                            'ma10_tolerance': 'Price near 10-day moving average',
+                            'reconsolidation': 'Volume control after breakout',
+                            'linear_moves': 'High R² correlation for linear trend',
+                            'avoid_barcode': 'Low average range to avoid erratic moves'
+                          };
+                          
+                          return (
+                            <div key={key} className={`p-4 rounded-lg border ${
+                              met ? 'bg-green-500/10 border-green-500/30' : 'bg-red-500/10 border-red-500/30'
+                            }`}>
+                              <div className="flex items-center gap-2 mb-2">
+                                {met ? (
+                                  <CheckCircle className="h-5 w-5 text-green-400" />
+                                ) : (
+                                  <XCircle className="h-5 w-5 text-red-400" />
+                                )}
+                                <h4 className="font-medium text-white">{criterionNames[key as keyof typeof criterionNames] || key}</h4>
+                              </div>
+                              <p className="text-sm text-muted-foreground">{descriptions[key as keyof typeof descriptions] || 'Criterion analysis'}</p>
+                              <div className="mt-2 text-xs text-muted-foreground">
+                                <span className={`font-medium ${met ? 'text-green-400' : 'text-red-400'}`}>
+                                  {met ? 'PASSED' : 'FAILED'}
+                                </span>
+                              </div>
                             </div>
-                            <p className="text-sm text-muted-foreground">{criterion.description}</p>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
