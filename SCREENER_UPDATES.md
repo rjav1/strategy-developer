@@ -14,9 +14,9 @@ The momentum screener has been completely updated to implement the "5 Star Tradi
 ### 2. Criteria Implementation
 
 #### Criterion 1: Large Percentage Move
-- **Requirement:** 25-35% move within last 30 days (dynamic range)
-- **Implementation:** Checks the last 30 days of price data for a move between 25-35%
-- **Dynamic:** Accepts moves between 25-35% instead of strict 30%
+- **Requirement:** >3 ADR move within last 30 days
+- **Implementation:** Checks the last 30 days of price data for a move greater than 3x the 20-day Average Daily Range
+- **Dynamic:** Accepts moves greater than 3 ADR (no upper limit)
 
 #### Criteria 2 & 3: Consolidation Pattern
 - **Requirement:** 3-20+ days consolidation with lower volume and range
@@ -78,7 +78,7 @@ The momentum screener has been completely updated to implement the "5 Star Tradi
 The system now emphasizes **dynamic analysis** over strict rules:
 
 - **Time Periods:** Consolidation can be 3-20+ days, with flexibility
-- **Percentage Ranges:** Large moves accepted between 25-35%
+- **Percentage Ranges:** Large moves accepted greater than 3 ADR
 - **Volume Analysis:** Relative volume comparisons rather than fixed thresholds
 - **Range Analysis:** ADR between 3-20% with dynamic evaluation
 - **MA Proximity:** 3-4% tolerance around MA10
@@ -97,7 +97,8 @@ Updated pattern strength thresholds:
 - **Minimum Data:** 50 days of historical data
 - **Default Period:** 3 months for analysis
 - **Moving Averages:** SMA10, SMA20 calculated automatically
-- **Volume Analysis:** 20-day volume moving average
+- **ADR Calculation:** 20-day Average Daily Range calculated automatically
+- **Volume Analysis:** 50-day volume moving average
 
 ## API Endpoints
 

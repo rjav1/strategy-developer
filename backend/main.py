@@ -124,6 +124,7 @@ class MomentumAnalysisResult(BaseModel):
     total_criteria_met: int
     pattern_strength: str  # "Strong", "Moderate", "Weak"
     criteria_met: Optional[Dict[str, bool]] = None
+    move_boundaries: Optional[Dict[str, Any]] = None  # Start and end candle indices for chart indicators
 
 # --- Utility Functions for New Momentum Screening ---
 
@@ -174,7 +175,7 @@ def find_consolidation_pattern(df: pd.DataFrame, min_days: int, max_days: int,
         return False
     
     # Calculate rolling averages for volume and range
-    vol_window = min(10, len(df) // 2)  # Use reasonable window for rolling averages
+    vol_window = min(50, len(df) // 2)  # Use 50-day window for rolling averages
     range_window = min(10, len(df) // 2)
     
     df_rolling = df.copy()
@@ -312,6 +313,179 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     true_range = ranges.max(axis=1)
     return true_range.rolling(window=period).mean()
 
+def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, dict]:
+    """
+    Detect the start and end candles of a momentum move.
+    
+    Returns:
+        tuple: (start_candle_index, end_candle_index, total_move_pct, move_details)
+    """
+    if len(df) < 30:
+        return -1, -1, 0.0, {}
+    
+    # Calculate additional metrics for move detection
+    df['price_change_pct'] = df['Close'].pct_change() * 100
+    df['volume_ratio'] = df['Volume'] / df['volume_sma']
+    df['price_vs_sma10'] = ((df['Close'] - df['SMA10']) / df['SMA10']) * 100  # Distance from SMA10
+    
+    # Get current ADR for threshold calculation
+    current_adr = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0
+    required_move = current_adr * 3  # Need 3x ADR
+    
+
+    
+    # Look for the most recent significant move in the last 60 days
+    lookback_days = min(60, len(df))
+    recent_data = df.tail(lookback_days).copy()
+    
+    # Enhanced approach: find the largest move and then refine the end point
+    best_move = 0.0
+    best_start = -1
+    best_end = -1
+    
+    # Test different start points (from 30 days ago to 10 days ago)
+    for start_idx in range(len(recent_data) - 30, len(recent_data) - 5):
+        if start_idx < 0:
+            continue
+            
+        # Calculate move from this start point to different end points
+        for end_idx in range(start_idx + 5, len(recent_data)):
+            start_price = recent_data.iloc[start_idx]['Close']
+            end_price = recent_data.iloc[end_idx]['Close']
+            
+            if start_price <= 0:
+                continue
+                
+            move_pct = ((end_price - start_price) / start_price) * 100
+            
+            # Check if this is a significant move
+            if move_pct >= required_move and move_pct > best_move:
+                # Additional validation: check if it's mostly upward
+                up_days = 0
+                total_days = end_idx - start_idx + 1
+                
+                for i in range(start_idx, end_idx + 1):
+                    if recent_data.iloc[i]['price_change_pct'] > 0:
+                        up_days += 1
+                
+                # At least 60% of days should be up days
+                if up_days / total_days >= 0.6:
+                    # NEW: Check if this looks like a breakout from consolidation (second move)
+                    # Look at the 5 days before the start to see if it was consolidating
+                    if start_idx >= 5:
+                        pre_move_data = recent_data.iloc[start_idx-5:start_idx]
+                        
+                        # Calculate if the pre-move period was consolidating
+                        pre_move_range = (pre_move_data['High'].max() - pre_move_data['Low'].min()) / pre_move_data['Open'].mean() * 100
+                        pre_move_volume_avg = pre_move_data['volume_ratio'].mean()
+                        
+                        # Consolidation characteristics - make it more aggressive to detect second moves
+                        # 1. Tight range (small daily ranges)
+                        # 2. Lower volume
+                        # 3. Smaller price changes
+                        # 4. Price not making new highs (sideways action)
+                        pre_move_highs = pre_move_data['High'].values
+                        is_sideways = all(pre_move_highs[i] <= pre_move_highs[i-1] * 1.02 for i in range(1, len(pre_move_highs)))  # No significant new highs
+                        
+                        is_consolidation = (
+                            pre_move_range < current_adr * 3 and  # Relaxed: tight range
+                            pre_move_volume_avg < 1.5 and  # Relaxed: lower volume
+                            pre_move_data['price_change_pct'].abs().mean() < current_adr * 0.8 and  # Relaxed: small price changes
+                            is_sideways  # Price not making new highs
+                        )
+                        
+                        # If this looks like a breakout from consolidation, give it much higher priority
+                        if is_consolidation:
+                            # Much bigger boost for consolidation breakouts
+                            adjusted_move = move_pct * 2.0  # 100% bonus for consolidation breakouts
+                        else:
+                            adjusted_move = move_pct
+                        
+                        if adjusted_move > best_move:
+                            best_move = adjusted_move
+                            best_start = len(df) - lookback_days + start_idx
+                            best_end = len(df) - lookback_days + end_idx
+                            print(f"DEBUG: Found move - {'CONSOLIDATION BREAKOUT' if is_consolidation else 'REGULAR MOVE'}: {move_pct:.1f}% (adjusted: {adjusted_move:.1f})")
+                    else:
+                        # If we can't check for consolidation, use the original logic
+                        if move_pct > best_move:
+                            best_move = move_pct
+                            best_start = len(df) - lookback_days + start_idx
+                            best_end = len(df) - lookback_days + end_idx
+    
+    # Now find the actual end of the move - SMART: find the highest point within the move
+    if best_start != -1 and best_end != -1:
+        # First, find the highest point in the initial move period
+        move_data = df.iloc[best_start:best_end+1]
+        initial_highest = move_data['High'].max()
+        
+        # Then look forward a few candles to see if we can find a higher point
+        # but stop if we hit significant consolidation (lower highs, lower volume)
+        look_ahead = min(5, len(df) - best_end - 1)  # Look ahead max 5 candles
+        
+        best_high = initial_highest
+        best_end_pos = best_end
+        
+        for i in range(1, look_ahead + 1):
+            if best_end + i >= len(df):
+                break
+                
+            current_high = df.iloc[best_end + i]['High']
+            current_volume = df.iloc[best_end + i]['volume_ratio']
+            
+            # Check if this candle is still part of the move (not consolidation)
+            # Consolidation indicators:
+            # 1. Lower high than the previous candle
+            # 2. Much lower volume
+            # 3. Price action becoming choppy
+            
+            if current_high > best_high:
+                # Found a higher high - this could still be part of the move
+                # But check if it's not consolidation
+                if i > 1:  # If we're looking beyond the first candle ahead
+                    prev_high = df.iloc[best_end + i - 1]['High']
+                    if current_high < prev_high * 1.02:  # Not a significant new high
+                        break  # This looks like consolidation
+                
+                best_high = current_high
+                best_end_pos = best_end + i
+            else:
+                # Lower high - likely consolidation
+                break
+        
+        best_end = best_end_pos
+    
+    if best_start == -1 or best_end == -1:
+        return -1, -1, 0.0, {}
+    
+    # Calculate final move details
+    start_price = df.iloc[best_start]['Close']
+    end_price = df.iloc[best_end]['Close']
+    total_move_pct = ((end_price - start_price) / start_price) * 100 if start_price > 0 else 0
+    
+    # Get volume characteristics
+    move_volume_avg = df.iloc[best_start:best_end+1]['volume_ratio'].mean()
+    start_volume_ratio = df.iloc[best_start]['volume_ratio']
+    end_volume_ratio = df.iloc[best_end]['volume_ratio']
+    
+    move_details = {
+        'start_candle': best_start,
+        'end_candle': best_end,
+        'start_date': df.index[best_start].strftime('%Y-%m-%d') if hasattr(df.index[best_start], 'strftime') else str(df.index[best_start]),
+        'end_date': df.index[best_end].strftime('%Y-%m-%d') if hasattr(df.index[best_end], 'strftime') else str(df.index[best_end]),
+        'start_price': round(start_price, 2),
+        'end_price': round(end_price, 2),
+        'total_move_pct': round(total_move_pct, 2),
+        'move_duration': best_end - best_start + 1,
+        'start_volume_ratio': round(start_volume_ratio, 2),
+        'end_volume_ratio': round(end_volume_ratio, 2),
+        'avg_volume_ratio': round(move_volume_avg, 2),
+        'required_move': round(required_move, 2),
+        'adr_20': round(current_adr, 2)
+    }
+    
+    return best_start, best_end, total_move_pct, move_details
+
 def check_momentum_pattern(hist_data: pd.DataFrame) -> tuple[bool, dict, float]:
     """
     Implement the updated "5 Star Trading Setup/Pattern Checklist" with 9 criteria.
@@ -327,31 +501,43 @@ def check_momentum_pattern(hist_data: pd.DataFrame) -> tuple[bool, dict, float]:
     
     # Calculate daily ranges and volume metrics
     df['daily_range_pct'] = (df['High'] - df['Low']) / df['Open'] * 100
+    df['ADR_20'] = df['daily_range_pct'].rolling(window=20).mean()  # 20-day Average Daily Range
     df['body_size_pct'] = abs(df['Close'] - df['Open']) / df['Open'] * 100
-    df['volume_sma'] = df['Volume'].rolling(window=20).mean()
+    df['volume_sma'] = df['Volume'].rolling(window=50).mean()
     
     criteria_met = {}
     criteria_details = {}
     
-    # Criterion 1: Large percentage move within last 30 days (25-35% range)
-    if len(df) >= 30:
-        last_30_days = df.tail(30)
-        start_price = last_30_days['Close'].iloc[0]
-        end_price = last_30_days['Close'].iloc[-1]
-        move_pct = ((end_price - start_price) / start_price) * 100 if start_price > 0 else 0
+    # Criterion 1: Large percentage move detection (>3 ADR)
+    start_candle, end_candle, move_pct, move_details = detect_momentum_move_boundaries(df)
+    
+    if start_candle != -1 and end_candle != -1:
+        # Get current ADR (20-day average daily range)
+        current_adr = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0  # Default to 5% if no ADR available
+        required_move = current_adr * 3  # Need 3x ADR
         
-        criteria_met['criterion1'] = 25 <= move_pct <= 35
+        criteria_met['criterion1'] = move_pct > required_move
         criteria_details['criterion1'] = {
             'met': criteria_met['criterion1'],
             'move_pct': round(move_pct, 2),
-            'description': f"Large move: {move_pct:.1f}% in last 30 days (need 25-35%)"
+            'adr_20': round(current_adr, 2),
+            'required_move': round(required_move, 2),
+            'start_candle': start_candle,
+            'end_candle': end_candle,
+            'move_details': move_details,
+            'description': f"Large move: {move_pct:.1f}% from {move_details['start_date']} to {move_details['end_date']} (need >{required_move:.1f}% = 3x ADR of {current_adr:.1f}%)"
         }
     else:
         criteria_met['criterion1'] = False
         criteria_details['criterion1'] = {
             'met': False,
             'move_pct': 0,
-            'description': "Insufficient data for 30-day analysis"
+            'adr_20': 0,
+            'required_move': 0,
+            'start_candle': -1,
+            'end_candle': -1,
+            'move_details': {},
+            'description': "No significant momentum move detected"
         }
     
     # Criteria 2 & 3: Consolidation with volume and range analysis
@@ -652,7 +838,7 @@ def check_momentum_pattern_custom(
     recent_volume = avg_volume = 0
     if 5 in enabled_criteria:
         recent_volume = df['Volume'].iloc[-1]
-        avg_volume = df['Volume'].iloc[-20:-1].mean()
+        avg_volume = df['Volume'].iloc[-50:-1].mean()
         volume_ratio = recent_volume / avg_volume if avg_volume > 0 else 0
         
         criterion5_met = volume_ratio >= volume_spike_threshold
@@ -1005,7 +1191,7 @@ async def screen_momentum(request: ScreeningRequest):
     Screen stocks for momentum patterns using updated 9-criteria system.
     
     This endpoint implements the "5 Star Trading Setup/Pattern Checklist" with:
-    1. Large percentage move within last 30 days (25-35% range)
+    1. Large percentage move within last 30 days (>3 ADR)
     2&3. Consolidation pattern with volume and range analysis
     4. MA10 tolerance (3-4% above or below)
     7. Reconsolidation after breakout
@@ -1117,7 +1303,7 @@ Pattern Strength: {strength}
 
 📊 DETAILED CRITERIA ANALYSIS:
 
-1. LARGE MOVE (25-35% in last 30 days):
+1. LARGE MOVE (>3 ADR in last 30 days):
    Status: {'✅ PASSED' if criteria_details.get('criterion1', {}).get('met', False) else '❌ FAILED'}
    {criteria_details.get('criterion1', {}).get('description', 'Analysis not available')}
 
@@ -1273,6 +1459,75 @@ with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in 
                     annotation_position="top right"
                 )
             
+            # Add move boundary indicators if available
+            if criteria_details.get('criterion1', {}).get('start_candle', -1) != -1:
+                start_candle = criteria_details['criterion1']['start_candle']
+                end_candle = criteria_details['criterion1']['end_candle']
+                move_details = criteria_details['criterion1'].get('move_details', {})
+                
+                # Convert candle indices to plot indices (accounting for the 200-day limit)
+                plot_start_idx = max(0, start_candle - (len(hist) - len(df_plot)))
+                plot_end_idx = max(0, end_candle - (len(hist) - len(df_plot)))
+                
+                if plot_start_idx < len(df_plot) and plot_end_idx < len(df_plot):
+                    # Add start marker
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[df_plot.index[plot_start_idx]],
+                            y=[df_plot.iloc[plot_start_idx]['Low'] * 0.98],  # Slightly below the low
+                            mode='markers+text',
+                            marker=dict(
+                                symbol='triangle-up',
+                                size=15,
+                                color='#10b981',
+                                line=dict(color='white', width=2)
+                            ),
+                            text=['MOVE START'],
+                            textposition='bottom center',
+                            textfont=dict(color='white', size=10, family='Arial Black'),
+                            name='Move Start',
+                            showlegend=False,
+                            hovertemplate='<b>Move Start</b><br>Date: %{x}<br>Price: $%{y:.2f}<br>Volume: %{text}<extra></extra>'
+                        ),
+                        row=1, col=1
+                    )
+                    
+                    # Add end marker
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[df_plot.index[plot_end_idx]],
+                            y=[df_plot.iloc[plot_end_idx]['High'] * 1.02],  # Slightly above the high
+                            mode='markers+text',
+                            marker=dict(
+                                symbol='triangle-down',
+                                size=15,
+                                color='#ef4444',
+                                line=dict(color='white', width=2)
+                            ),
+                            text=['MOVE END'],
+                            textposition='top center',
+                            textfont=dict(color='white', size=10, family='Arial Black'),
+                            name='Move End',
+                            showlegend=False,
+                            hovertemplate='<b>Move End</b><br>Date: %{x}<br>Price: $%{y:.2f}<br>Move: %{text}<extra></extra>'
+                        ),
+                        row=1, col=1
+                    )
+                    
+                    # Add move label at the bottom (no shading)
+                    fig.add_annotation(
+                        x=df_plot.index[plot_start_idx + (plot_end_idx - plot_start_idx) // 2],  # Center of the move
+                        y=df_plot.iloc[plot_start_idx:plot_end_idx+1]['Low'].min() * 0.95,  # Below the lowest point
+                        text=f"Momentum Move ({move_details.get('total_move_pct', 0):.1f}%)",
+                        showarrow=False,
+                        font=dict(color="orange", size=12, family="Arial Black"),
+                        bgcolor="rgba(0,0,0,0.7)",
+                        bordercolor="orange",
+                        borderwidth=1,
+                        xanchor="center",
+                        yanchor="top"
+                    )
+            
             # Update layout for dark theme
             fig.update_layout(
                 template='plotly_dark',
@@ -1357,6 +1612,15 @@ with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in 
         
         total_criteria_met = sum(criteria_met.values())
         
+        # Extract move boundaries for chart indicators
+        move_boundaries = None
+        if criteria_details.get('criterion1', {}).get('start_candle', -1) != -1:
+            move_boundaries = {
+                'start_candle': criteria_details['criterion1']['start_candle'],
+                'end_candle': criteria_details['criterion1']['end_candle'],
+                'move_details': criteria_details['criterion1'].get('move_details', {})
+            }
+        
         return MomentumAnalysisResult(
             symbol=symbol.upper(),
             pattern_found=pattern_found,
@@ -1366,7 +1630,8 @@ with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in 
             criteria_details=None,  # Simplified for now
             total_criteria_met=total_criteria_met,
             pattern_strength=strength,
-            criteria_met=criteria_met
+            criteria_met=criteria_met,
+            move_boundaries=move_boundaries
         )
         
     except Exception as e:

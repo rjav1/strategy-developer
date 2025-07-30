@@ -72,6 +72,23 @@ interface MomentumAnalysisResult {
   criteria_details: MomentumCriteria | null
   total_criteria_met: number
   pattern_strength: string
+  move_boundaries?: {
+    start_candle: number
+    end_candle: number
+    move_details: {
+      start_date: string
+      end_date: string
+      start_price: number
+      end_price: number
+      total_move_pct: number
+      move_duration: number
+      start_volume_ratio: number
+      end_volume_ratio: number
+      avg_volume_ratio: number
+      required_move: number
+      adr_20: number
+    }
+  } | null
 }
 
 export default function Analytics() {
@@ -342,29 +359,73 @@ export default function Analytics() {
           {/* Annotated Chart */}
           {analysisResult.chart_image_base64 && (
             <div className="card-glow p-6">
-              <h3 className="text-xl font-semibold text-white mb-4">Annotated Technical Analysis Chart</h3>
+              <h3 className="text-xl font-semibold text-white mb-4">Interactive Technical Analysis Chart</h3>
               <div className="bg-white rounded-lg p-4">
-                <img 
-                  src={analysisResult.chart_image_base64} 
-                  alt={`${analysisResult.symbol} Momentum Analysis Chart`}
+                <div 
+                  dangerouslySetInnerHTML={{ __html: analysisResult.chart_image_base64 }}
                   className="w-full h-auto"
                 />
               </div>
+              
+              {/* Move Boundaries Info */}
+              {analysisResult.move_boundaries && (
+                <div className="mt-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                  <h4 className="font-medium text-white mb-3 flex items-center gap-2">
+                    <Target className="h-4 w-4 text-blue-400" />
+                    Momentum Move Detected
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="text-muted-foreground">Move Period:</p>
+                      <p className="text-white font-medium">
+                        {analysisResult.move_boundaries.move_details.start_date} → {analysisResult.move_boundaries.move_details.end_date}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Price Range:</p>
+                      <p className="text-white font-medium">
+                        ${analysisResult.move_boundaries.move_details.start_price} → ${analysisResult.move_boundaries.move_details.end_price}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Total Move:</p>
+                      <p className="text-white font-medium">
+                        {analysisResult.move_boundaries.move_details.total_move_pct}% ({analysisResult.move_boundaries.move_details.move_duration} days)
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Volume Profile:</p>
+                      <p className="text-white font-medium">
+                        Start: {analysisResult.move_boundaries.move_details.start_volume_ratio}x avg
+                      </p>
+                      <p className="text-white font-medium">
+                        End: {analysisResult.move_boundaries.move_details.end_volume_ratio}x avg
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 p-2 bg-blue-500/20 rounded text-xs text-blue-300">
+                    <strong>Chart Indicators:</strong> The start and end of the momentum move are marked on the chart above with special indicators.
+                  </div>
+                </div>
+              )}
+              
               <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-muted-foreground">
                 <div>
                   <h4 className="font-medium text-white mb-2">Chart Features:</h4>
                   <ul className="space-y-1">
-                    <li>• Candlestick price action with volume</li>
+                    <li>• Interactive candlestick chart with volume</li>
                     <li>• Moving averages (SMA10, SMA20, SMA50)</li>
-                    <li>• Pattern annotations and labels</li>
+                    <li>• Momentum move start/end indicators</li>
+                    <li>• Zoom, pan, and hover functionality</li>
                   </ul>
                 </div>
                 <div>
                   <h4 className="font-medium text-white mb-2">Key Highlights:</h4>
                   <ul className="space-y-1">
-                    <li>• Consolidation zones marked</li>
-                    <li>• Breakout points identified</li>
-                    <li>• Volume spikes highlighted</li>
+                    <li>• Momentum move boundaries marked</li>
+                    <li>• Consolidation zones identified</li>
+                    <li>• Volume analysis integrated</li>
+                    <li>• Real-time data interaction</li>
                   </ul>
                 </div>
               </div>
