@@ -1,5 +1,6 @@
 import yfinance as yf
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -19,6 +20,7 @@ import warnings
 warnings.filterwarnings('ignore')
 import concurrent.futures
 import requests
+import asyncio
 
 # Global cache for all NYSE tickers
 nyse_ticker_cache = None
@@ -315,7 +317,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, dict]:
     """
-    Detect the start and end candles of a momentum move.
+    Improved momentum move detection with better start/end identification.
     
     Returns:
         tuple: (start_candle_index, end_candle_index, total_move_pct, move_details)
@@ -326,26 +328,50 @@ def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, 
     # Calculate additional metrics for move detection
     df['price_change_pct'] = df['Close'].pct_change() * 100
     df['volume_ratio'] = df['Volume'] / df['volume_sma']
-    df['price_vs_sma10'] = ((df['Close'] - df['SMA10']) / df['SMA10']) * 100  # Distance from SMA10
+    df['price_vs_sma10'] = ((df['Close'] - df['SMA10']) / df['SMA10']) * 100
+    
+    # Calculate momentum indicators
+    df['momentum_5'] = df['Close'].pct_change(5) * 100  # 5-day momentum
+    df['momentum_10'] = df['Close'].pct_change(10) * 100  # 10-day momentum
+    df['volume_momentum'] = df['Volume'].pct_change(5) * 100  # Volume momentum
     
     # Get current ADR for threshold calculation
     current_adr = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0
     required_move = current_adr * 3  # Need 3x ADR
     
-
-    
     # Look for the most recent significant move in the last 60 days
     lookback_days = min(60, len(df))
     recent_data = df.tail(lookback_days).copy()
     
-    # Enhanced approach: find the largest move and then refine the end point
     best_move = 0.0
     best_start = -1
     best_end = -1
+    best_score = 0.0
     
-    # Test different start points (from 30 days ago to 10 days ago)
-    for start_idx in range(len(recent_data) - 30, len(recent_data) - 5):
+    # IMPROVED: More sophisticated move detection with recency focus
+    # Test different start points (from 30 days ago to 10 days ago) - more recent focus
+    for start_idx in range(len(recent_data) - 30, len(recent_data) - 10):
         if start_idx < 0:
+            continue
+            
+        # IMPROVED: Check for gap-up conditions and momentum characteristics
+        start_momentum_5 = recent_data.iloc[start_idx]['momentum_5']
+        start_momentum_10 = recent_data.iloc[start_idx]['momentum_10']
+        start_volume_momentum = recent_data.iloc[start_idx]['volume_momentum']
+        
+        # Check for gap-up potential (next day has big move)
+        has_gap_up = False
+        if start_idx + 1 < len(recent_data):
+            next_day_gap = ((recent_data.iloc[start_idx + 1]['Open'] - recent_data.iloc[start_idx]['Close']) / 
+                           recent_data.iloc[start_idx]['Close']) * 100
+            next_day_volume_spike = recent_data.iloc[start_idx + 1]['volume_ratio']
+            
+            # If next day has gap up > 3% and volume spike > 2x, this could be the start
+            if next_day_gap > 3.0 and next_day_volume_spike > 2.0:
+                has_gap_up = True
+        
+        # Skip if no momentum at start AND no gap-up potential
+        if not has_gap_up and start_momentum_5 < 2.0 and start_momentum_10 < 3.0:
             continue
             
         # Calculate move from this start point to different end points
@@ -358,102 +384,135 @@ def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, 
                 
             move_pct = ((end_price - start_price) / start_price) * 100
             
-            # Check if this is a significant move
-            if move_pct >= required_move and move_pct > best_move:
-                # Additional validation: check if it's mostly upward
-                up_days = 0
+            # Check if this is a significant move and not too long
+            move_duration = end_idx - start_idx + 1
+            if move_pct >= required_move and move_duration <= 12:  # Max 12 days for a move (reduced from 15)
+                # IMPROVED: Calculate move quality score
+                move_data = recent_data.iloc[start_idx:end_idx+1]
+                
+                # 1. Upward bias (60% up days)
+                up_days = sum(1 for i in range(start_idx, end_idx + 1) 
+                            if recent_data.iloc[i]['price_change_pct'] > 0)
                 total_days = end_idx - start_idx + 1
+                up_ratio = up_days / total_days if total_days > 0 else 0
                 
+                if up_ratio < 0.6:
+                    continue
+                
+                # 2. Volume confirmation
+                avg_volume_ratio = move_data['volume_ratio'].mean()
+                volume_score = min(avg_volume_ratio / 1.5, 2.0)  # Cap at 2.0
+                
+                # 3. Momentum consistency
+                momentum_consistency = 0
                 for i in range(start_idx, end_idx + 1):
-                    if recent_data.iloc[i]['price_change_pct'] > 0:
-                        up_days += 1
+                    if recent_data.iloc[i]['momentum_5'] > 0:
+                        momentum_consistency += 1
+                momentum_score = momentum_consistency / total_days
                 
-                # At least 60% of days should be up days
-                if up_days / total_days >= 0.6:
-                    # NEW: Check if this looks like a breakout from consolidation (second move)
-                    # Look at the 5 days before the start to see if it was consolidating
-                    if start_idx >= 5:
-                        pre_move_data = recent_data.iloc[start_idx-5:start_idx]
-                        
-                        # Calculate if the pre-move period was consolidating
-                        pre_move_range = (pre_move_data['High'].max() - pre_move_data['Low'].min()) / pre_move_data['Open'].mean() * 100
-                        pre_move_volume_avg = pre_move_data['volume_ratio'].mean()
-                        
-                        # Consolidation characteristics - make it more aggressive to detect second moves
-                        # 1. Tight range (small daily ranges)
-                        # 2. Lower volume
-                        # 3. Smaller price changes
-                        # 4. Price not making new highs (sideways action)
-                        pre_move_highs = pre_move_data['High'].values
-                        is_sideways = all(pre_move_highs[i] <= pre_move_highs[i-1] * 1.02 for i in range(1, len(pre_move_highs)))  # No significant new highs
-                        
-                        is_consolidation = (
-                            pre_move_range < current_adr * 3 and  # Relaxed: tight range
-                            pre_move_volume_avg < 1.5 and  # Relaxed: lower volume
-                            pre_move_data['price_change_pct'].abs().mean() < current_adr * 0.8 and  # Relaxed: small price changes
-                            is_sideways  # Price not making new highs
-                        )
-                        
-                        # If this looks like a breakout from consolidation, give it much higher priority
-                        if is_consolidation:
-                            # Much bigger boost for consolidation breakouts
-                            adjusted_move = move_pct * 2.0  # 100% bonus for consolidation breakouts
-                        else:
-                            adjusted_move = move_pct
-                        
-                        if adjusted_move > best_move:
-                            best_move = adjusted_move
-                            best_start = len(df) - lookback_days + start_idx
-                            best_end = len(df) - lookback_days + end_idx
-                            print(f"DEBUG: Found move - {'CONSOLIDATION BREAKOUT' if is_consolidation else 'REGULAR MOVE'}: {move_pct:.1f}% (adjusted: {adjusted_move:.1f})")
-                    else:
-                        # If we can't check for consolidation, use the original logic
-                        if move_pct > best_move:
-                            best_move = move_pct
-                            best_start = len(df) - lookback_days + start_idx
-                            best_end = len(df) - lookback_days + end_idx
+                # 4. Check for consolidation breakout
+                consolidation_bonus = 1.0
+                if start_idx >= 5:
+                    pre_move_data = recent_data.iloc[start_idx-5:start_idx]
+                    
+                    # More strict consolidation detection
+                    pre_move_range = (pre_move_data['High'].max() - pre_move_data['Low'].min()) / pre_move_data['Open'].mean() * 100
+                    pre_move_volume_avg = pre_move_data['volume_ratio'].mean()
+                    pre_move_momentum = pre_move_data['momentum_5'].abs().mean()
+                    
+                    # Check if it was truly consolidating
+                    is_consolidation = (
+                        pre_move_range < current_adr * 2.5 and  # Tighter range
+                        pre_move_volume_avg < 1.2 and  # Lower volume
+                        pre_move_momentum < current_adr * 0.5 and  # Low momentum
+                        pre_move_data['momentum_5'].std() < current_adr * 0.3  # Consistent low momentum
+                    )
+                    
+                    if is_consolidation:
+                        consolidation_bonus = 2.0  # 100% bonus for true consolidation breakouts
+                
+                # 5. Calculate recency bias (favor more recent moves)
+                days_from_end = len(recent_data) - end_idx
+                recency_bonus = max(1.0, 3.0 - (days_from_end * 0.1))  # Recent moves get up to 3x bonus
+                
+                # 6. Calculate overall score
+                base_score = move_pct
+                quality_score = (up_ratio * 0.3 + volume_score * 0.3 + momentum_score * 0.4) * 100
+                final_score = (base_score + quality_score) * consolidation_bonus * recency_bonus
+                
+                if final_score > best_score:
+                    best_score = final_score
+                    best_move = move_pct
+                    best_start = len(df) - lookback_days + start_idx
+                    best_end = len(df) - lookback_days + end_idx
     
-    # Now find the actual end of the move - SMART: find the highest point within the move
+    # IMPROVED: Find the actual momentum peak within the move
     if best_start != -1 and best_end != -1:
-        # First, find the highest point in the initial move period
         move_data = df.iloc[best_start:best_end+1]
-        initial_highest = move_data['High'].max()
         
-        # Then look forward a few candles to see if we can find a higher point
-        # but stop if we hit significant consolidation (lower highs, lower volume)
-        look_ahead = min(5, len(df) - best_end - 1)  # Look ahead max 5 candles
+        # Find the peak momentum point, prioritizing price highs
+        peak_momentum_idx = best_start
+        peak_momentum_value = 0
+        peak_high = df.iloc[best_start]['High']
         
-        best_high = initial_highest
-        best_end_pos = best_end
-        
-        for i in range(1, look_ahead + 1):
-            if best_end + i >= len(df):
-                break
-                
-            current_high = df.iloc[best_end + i]['High']
-            current_volume = df.iloc[best_end + i]['volume_ratio']
+        for i in range(best_start, best_end + 1):
+            current_momentum = df.iloc[i]['momentum_5']
+            current_volume = df.iloc[i]['volume_ratio']
+            current_high = df.iloc[i]['High']
             
-            # Check if this candle is still part of the move (not consolidation)
-            # Consolidation indicators:
-            # 1. Lower high than the previous candle
-            # 2. Much lower volume
-            # 3. Price action becoming choppy
+            # Combined momentum score (momentum + volume)
+            momentum_score = current_momentum * min(current_volume, 3.0)  # Cap volume at 3x
             
-            if current_high > best_high:
-                # Found a higher high - this could still be part of the move
-                # But check if it's not consolidation
-                if i > 1:  # If we're looking beyond the first candle ahead
-                    prev_high = df.iloc[best_end + i - 1]['High']
-                    if current_high < prev_high * 1.02:  # Not a significant new high
-                        break  # This looks like consolidation
-                
-                best_high = current_high
-                best_end_pos = best_end + i
+            # Prioritize higher highs - if this candle has a higher high, it's likely the peak
+            if current_high > peak_high:
+                peak_high = current_high
+                peak_momentum_idx = i
+                peak_momentum_value = momentum_score
+            elif current_high == peak_high and momentum_score > peak_momentum_value:
+                # If same high, prefer higher momentum
+                peak_momentum_value = momentum_score
+                peak_momentum_idx = i
+        
+        # Now look forward from peak momentum to find where consolidation begins
+        consolidation_start = peak_momentum_idx
+        
+        # Track consecutive consolidation signals
+        consolidation_signals = 0
+        max_consolidation_signals = 2  # Allow 2 consecutive consolidation signals before ending
+        
+        for i in range(peak_momentum_idx + 1, min(peak_momentum_idx + 8, len(df))):  # Increased look-ahead from 5 to 8
+            current_momentum = df.iloc[i]['momentum_5']
+            current_volume = df.iloc[i]['volume_ratio']
+            current_close = df.iloc[i]['Close']
+            current_open = df.iloc[i]['Open']
+            prev_close = df.iloc[i-1]['Close']
+            
+            # More relaxed consolidation signals
+            is_red_candle = current_close < current_open
+            is_lower_close = current_close < prev_close
+            is_low_momentum = current_momentum < 2.0  # Relaxed from 3.0 to 2.0
+            is_low_volume = current_volume < 0.8  # Relaxed from 1.0 to 0.8
+            
+            # Check if this candle shows consolidation
+            # Prioritize price action over momentum - if price is lower than previous high, it's consolidation
+            prev_high = df.iloc[i-1]['High']
+            current_high = df.iloc[i]['High']
+            is_lower_high = current_high < prev_high  # This is the key addition
+            
+            consolidation_signal = is_red_candle or is_lower_close or is_low_momentum or is_low_volume or is_lower_high
+            
+            if consolidation_signal:
+                consolidation_signals += 1
+                # Only end if we see multiple consecutive consolidation signals
+                if consolidation_signals >= max_consolidation_signals:
+                    consolidation_start = i - max_consolidation_signals  # End before the consolidation signals
+                    break
             else:
-                # Lower high - likely consolidation
-                break
+                # Reset consolidation signal counter if we see momentum continuation
+                consolidation_signals = 0
+                consolidation_start = i  # Update end point to include this momentum candle
         
-        best_end = best_end_pos
+        best_end = max(peak_momentum_idx, consolidation_start)
     
     if best_start == -1 or best_end == -1:
         return -1, -1, 0.0, {}
@@ -481,7 +540,8 @@ def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, 
         'end_volume_ratio': round(end_volume_ratio, 2),
         'avg_volume_ratio': round(move_volume_avg, 2),
         'required_move': round(required_move, 2),
-        'adr_20': round(current_adr, 2)
+        'adr_20': round(current_adr, 2),
+        'move_score': round(best_score, 2)
     }
     
     return best_start, best_end, total_move_pct, move_details
@@ -540,42 +600,11 @@ def check_momentum_pattern(hist_data: pd.DataFrame) -> tuple[bool, dict, float]:
             'description': "No significant momentum move detected"
         }
     
-    # Criteria 2 & 3: Consolidation with volume and range analysis
-    # Look for 3-20+ days of consolidation with lower volume and range
-    consolidation_found = False
-    consol_days = 0
-    avg_range_during_consol = 0
-    volume_ratio = 0
-    
-    for days in range(3, min(21, len(df))):
-        recent_data = df.tail(days)
-        
-        # Check if range is tight (ADR between 3-20%)
-        avg_range = recent_data['daily_range_pct'].mean()
-        if 3 <= avg_range <= 20:
-            # Check if volume is below average
-            avg_volume = recent_data['volume_sma'].mean()
-            current_volume = recent_data['Volume'].mean()
-            vol_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-            
-            # Check if body sizes are smaller (closer open/close)
-            avg_body = recent_data['body_size_pct'].mean()
-            
-            if vol_ratio < 0.8 and avg_body < avg_range * 0.6:  # Volume 20% below avg, body 60% of range
-                consolidation_found = True
-                consol_days = days
-                avg_range_during_consol = avg_range
-                volume_ratio = vol_ratio
-                break
+    # Criteria 2 & 3: New consolidation pattern detection using move boundaries
+    consolidation_found, consolidation_details = detect_consolidation_pattern_new(df, start_candle, end_candle)
     
     criteria_met['criterion2_3'] = consolidation_found
-    criteria_details['criterion2_3'] = {
-        'met': consolidation_found,
-        'consol_days': consol_days,
-        'avg_range': round(avg_range_during_consol, 2),
-        'volume_ratio': round(volume_ratio, 2),
-        'description': f"Consolidation: {consol_days} days, {avg_range_during_consol:.1f}% range, {volume_ratio:.2f}x volume"
-    }
+    criteria_details['criterion2_3'] = consolidation_details
     
     # Criterion 4: MA10 tolerance (3-4% above or below)
     if len(df) >= 10:
@@ -950,7 +979,7 @@ def check_momentum_pattern_custom(
     
     return pattern_found, criteria_details, confidence_score
 
-def generate_annotated_chart(symbol: str, df: pd.DataFrame, criteria: MomentumCriteria) -> str:
+def generate_annotated_chart(symbol: str, df: pd.DataFrame, criteria: MomentumCriteria, move_boundaries: dict = None) -> str:
     """
     Generate a comprehensive annotated chart for momentum pattern analysis.
     Returns base64 encoded image string.
@@ -994,12 +1023,35 @@ def generate_annotated_chart(symbol: str, df: pd.DataFrame, criteria: MomentumCr
         ax_main = axes[0]  # Main price chart
         ax_vol = axes[1]   # Volume chart
         
+        # Highlight consolidation period if move boundaries are provided
+        if move_boundaries and 'end_candle' in move_boundaries:
+            move_end_idx = move_boundaries['end_candle']
+            if move_end_idx >= 0 and move_end_idx < len(df_plot):
+                # Consolidation period starts after the move ends
+                consolidation_start_idx = move_end_idx + 1
+                if consolidation_start_idx < len(df_plot):
+                    # Get consolidation period data
+                    consolidation_data = df_plot.iloc[consolidation_start_idx:]
+                    
+                    # Highlight consolidation period with a light blue background
+                    for i, (date, row) in enumerate(consolidation_data.iterrows()):
+                        # Create a rectangle for each consolidation candle
+                        rect = plt.Rectangle(
+                            (i + consolidation_start_idx - 0.4, row['Low'] * 0.99), 
+                            0.8, 
+                            (row['High'] - row['Low']) * 1.02,
+                            facecolor='lightblue', 
+                            alpha=0.3, 
+                            edgecolor='none'
+                        )
+                        ax_main.add_patch(rect)
+        
         # Annotation positions (using data coordinates)
         last_date = df_plot.index[-1]
         last_price = df_plot['Close'].iloc[-1]
         
         # Breakout day annotation
-        if criteria.criterion6_close_at_hod['met']:
+        if hasattr(criteria, 'criterion6_close_at_hod') and criteria.criterion6_close_at_hod.get('met', False):
             ax_main.annotate('Breakout Day\n(Close at HOD)', 
                            xy=(last_date, last_price),
                            xytext=(last_date - pd.Timedelta(days=10), last_price * 1.05),
@@ -1008,9 +1060,9 @@ def generate_annotated_chart(symbol: str, df: pd.DataFrame, criteria: MomentumCr
                            bbox=dict(boxstyle="round,pad=0.3", facecolor='lightgreen', alpha=0.7))
         
         # Volume spike annotation
-        if criteria.criterion5_volume_breakout['met']:
+        if hasattr(criteria, 'criterion5_volume_breakout') and criteria.criterion5_volume_breakout.get('met', False):
             last_volume = df_plot['Volume'].iloc[-1]
-            ax_vol.annotate('Volume Spike\n' + f"{criteria.criterion5_volume_breakout['volume_ratio']:.1f}x avg",
+            ax_main.annotate('Volume Spike\n' + f"{criteria.criterion5_volume_breakout.get('volume_ratio', 0):.1f}x avg",
                           xy=(last_date, last_volume),
                           xytext=(last_date - pd.Timedelta(days=15), last_volume * 1.3),
                           arrowprops=dict(arrowstyle='->', color='purple', lw=2),
@@ -1018,10 +1070,10 @@ def generate_annotated_chart(symbol: str, df: pd.DataFrame, criteria: MomentumCr
                           bbox=dict(boxstyle="round,pad=0.3", facecolor='plum', alpha=0.7))
         
         # Consolidation period annotation
-        if criteria.criterion2_consolidation['met']:
+        if hasattr(criteria, 'criterion2_consolidation') and criteria.criterion2_consolidation.get('met', False):
             consolidation_start = df_plot.index[-20]
             consolidation_price = df_plot['Close'].iloc[-20:].mean()
-            ax_main.annotate('Consolidation Zone\n' + f"{criteria.criterion2_consolidation['consolidation_days']} days",
+            ax_main.annotate('Consolidation Zone\n' + f"{criteria.criterion2_consolidation.get('consolidation_days', 0)} days",
                            xy=(consolidation_start, consolidation_price),
                            xytext=(consolidation_start - pd.Timedelta(days=5), consolidation_price * 0.95),
                            arrowprops=dict(arrowstyle='->', color='blue', lw=2),
@@ -1029,10 +1081,10 @@ def generate_annotated_chart(symbol: str, df: pd.DataFrame, criteria: MomentumCr
                            bbox=dict(boxstyle="round,pad=0.3", facecolor='lightblue', alpha=0.7))
         
         # Large move annotation
-        if criteria.criterion1_large_move['met']:
+        if hasattr(criteria, 'criterion1_large_move') and criteria.criterion1_large_move.get('met', False):
             move_start = df_plot.index[-90] if len(df_plot) > 90 else df_plot.index[0]
             move_price = df_plot['Close'].iloc[-90] if len(df_plot) > 90 else df_plot['Close'].iloc[0]
-            ax_main.annotate(f"Big Uptrend\n{criteria.criterion1_large_move['percentage_move']:.1f}% move",
+            ax_main.annotate(f"Big Uptrend\n{criteria.criterion1_large_move.get('percentage_move', 0):.1f}% move",
                            xy=(move_start, move_price),
                            xytext=(move_start + pd.Timedelta(days=20), move_price * 0.9),
                            arrowprops=dict(arrowstyle='->', color='red', lw=2),
@@ -1040,7 +1092,7 @@ def generate_annotated_chart(symbol: str, df: pd.DataFrame, criteria: MomentumCr
                            bbox=dict(boxstyle="round,pad=0.3", facecolor='lightcoral', alpha=0.7))
         
         # MA surfing annotation
-        if criteria.criterion4_moving_averages['met']:
+        if hasattr(criteria, 'criterion4_moving_averages') and criteria.criterion4_moving_averages.get('met', False):
             ma_date = df_plot.index[-10]
             ma_price = df_plot['SMA20'].iloc[-10]
             ax_main.annotate('Surfing MAs',
@@ -1182,7 +1234,7 @@ async def get_ticker_data(
         raise HTTPException(status_code=500, detail=f"Error fetching data for '{symbol}': {str(e)}")
 
 class ScreeningRequest(BaseModel):
-    symbols: List[str]
+    symbols: Optional[List[str]] = None
     criteria: MomentumCriteria
 
 @app.post("/screen_momentum", response_model=List[ScreenResult])
@@ -1202,11 +1254,21 @@ async def screen_momentum(request: ScreeningRequest):
     """
     results = []
     
-    for symbol in request.symbols:
+    # Use provided symbols or get comprehensive list
+    if request.symbols and len(request.symbols) > 0:
+        symbols_to_screen = request.symbols
+    else:
+        symbols_to_screen = get_comprehensive_stock_list()
+    
+    total_symbols = len(symbols_to_screen)
+    processed_count = 0
+    
+    for symbol in symbols_to_screen:
         try:
             # Clean symbol
             clean_symbol = symbol.replace('$', '').replace('/', '').replace('-', '').upper().strip()
             if not clean_symbol or len(clean_symbol) > 6:
+                processed_count += 1
                 continue
                 
             # Fetch data
@@ -1214,6 +1276,7 @@ async def screen_momentum(request: ScreeningRequest):
             hist = ticker.history(period="3mo")  # 3 months for analysis
             
             if hist.empty or len(hist) < 50:
+                processed_count += 1
                 continue
             
             # Run momentum analysis using updated function
@@ -1258,13 +1321,132 @@ async def screen_momentum(request: ScreeningRequest):
             
             results.append(result)
             
+            processed_count += 1
+            
         except Exception as e:
             print(f"Error processing {symbol}: {str(e)}")
+            processed_count += 1
             continue
     
     # Sort by total criteria met and confidence
     sorted_results = sorted(results, key=lambda x: (x.total_met, x.pattern_strength), reverse=True)
     return sorted_results
+
+@app.post("/screen_momentum_stream")
+async def screen_momentum_stream(request: ScreeningRequest):
+    """
+    Stream momentum screening results with real-time progress updates.
+    Uses Server-Sent Events (SSE) to provide live progress feedback.
+    """
+    async def generate():
+        results = []
+        
+        # Use provided symbols or get comprehensive list
+        if request.symbols and len(request.symbols) > 0:
+            symbols_to_screen = request.symbols
+        else:
+            symbols_to_screen = get_comprehensive_stock_list()
+        
+        total_symbols = len(symbols_to_screen)
+        processed_count = 0
+        
+        # Send initial progress
+        initial_data = {'type': 'progress', 'current': 0, 'total': total_symbols, 'percent': 0, 'current_symbol': 'Initializing...', 'message': 'Starting screening process...'}
+        print(f"Backend sending initial progress: {initial_data}")  # Debug log
+        yield f"data: {json.dumps(initial_data)}\n\n"
+        
+        for symbol in symbols_to_screen:
+            # Check for cancellation periodically
+            await asyncio.sleep(0)  # Allow other tasks to run and check for cancellation
+            
+            try:
+                # Clean symbol
+                clean_symbol = symbol.replace('$', '').replace('/', '').replace('-', '').upper().strip()
+                if not clean_symbol or len(clean_symbol) > 6:
+                    processed_count += 1
+                    percent = int((processed_count / total_symbols) * 100)
+                    yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Skipping invalid symbol: {clean_symbol}'})}\n\n"
+                    continue
+                
+                # Send progress update
+                percent = int((processed_count / total_symbols) * 100)
+                progress_data = {'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Analyzing {clean_symbol}...'}
+                print(f"Backend sending progress: {progress_data}")  # Debug log
+                yield f"data: {json.dumps(progress_data)}\n\n"
+                
+                # Fetch data
+                ticker = yf.Ticker(clean_symbol)
+                hist = ticker.history(period="3mo")  # 3 months for analysis
+                
+                # Check for cancellation after data fetch
+                await asyncio.sleep(0)
+                
+                if hist.empty or len(hist) < 50:
+                    processed_count += 1
+                    percent = int((processed_count / total_symbols) * 100)
+                    yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Insufficient data for {clean_symbol}'})}\n\n"
+                    continue
+                
+                # Run momentum analysis using updated function
+                pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist)
+                
+                # Get company name
+                try:
+                    info = ticker.info
+                    company_name = info.get('longName', info.get('shortName', clean_symbol)) if info else clean_symbol
+                except:
+                    company_name = clean_symbol
+                
+                # Determine pattern strength
+                if confidence_score >= 80:
+                    strength = "Strong"
+                elif confidence_score >= 60:
+                    strength = "Moderate"
+                elif confidence_score >= 40:
+                    strength = "Weak"
+                else:
+                    strength = "Very Weak"
+                
+                # Create criteria met dictionary
+                criteria_met = {
+                    'large_move': criteria_details.get('criterion1', {}).get('met', False),
+                    'consolidation': criteria_details.get('criterion2_3', {}).get('met', False),
+                    'ma10_tolerance': criteria_details.get('criterion4', {}).get('met', False),
+                    'reconsolidation': criteria_details.get('criterion7', {}).get('met', False),
+                    'linear_moves': criteria_details.get('criterion8', {}).get('met', False),
+                    'avoid_barcode': criteria_details.get('criterion9', {}).get('met', False)
+                }
+                
+                total_met = sum(criteria_met.values())
+                
+                result = ScreenResult(
+                    symbol=clean_symbol,
+                    criteria_met=criteria_met,
+                    total_met=total_met,
+                    pattern_strength=strength,
+                    name=company_name
+                )
+                
+                # Only include stocks that meet minimum criteria
+                if total_met >= 2:  # At least 2 criteria met
+                    results.append(result)
+                    yield f"data: {json.dumps({'type': 'result', 'result': result.dict(), 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Found pattern in {clean_symbol} ({total_met}/6 criteria)'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'No pattern found in {clean_symbol}'})}\n\n"
+                
+                processed_count += 1
+                
+            except Exception as e:
+                processed_count += 1
+                percent = int((processed_count / total_symbols) * 100)
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e), 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': symbol, 'message': f'Error processing {symbol}: {str(e)}'})}\n\n"
+                continue
+        
+        # Send completion message
+        sorted_results = sorted(results, key=lambda x: (x.total_met, x.pattern_strength), reverse=True)
+        yield f"data: {json.dumps({'type': 'complete', 'results': [r.dict() for r in sorted_results], 'total_found': len(sorted_results), 'message': 'Screening completed!'})}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/plain")
 
 @app.get("/analyze/momentum_pattern/{symbol}", response_model=MomentumAnalysisResult)
 async def analyze_momentum_pattern(
@@ -1307,9 +1489,15 @@ Pattern Strength: {strength}
    Status: {'✅ PASSED' if criteria_details.get('criterion1', {}).get('met', False) else '❌ FAILED'}
    {criteria_details.get('criterion1', {}).get('description', 'Analysis not available')}
 
-2&3. CONSOLIDATION PATTERN (Volume & Range Analysis):
+2. CONSOLIDATION PATTERN (New 4-Criteria Analysis):
    Status: {'✅ PASSED' if criteria_details.get('criterion2_3', {}).get('met', False) else '❌ FAILED'}
    {criteria_details.get('criterion2_3', {}).get('description', 'Analysis not available')}
+   
+   Criteria Breakdown:
+   • Candle Count: {'✅' if criteria_details.get('criterion2_3', {}).get('consolidation_candles', 0) >= 3 else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_candles', 0)} candles (need ≥3)
+   • Volume: {'✅' if criteria_details.get('criterion2_3', {}).get('volume_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_avg_volume', 0):.0f} vs {criteria_details.get('criterion2_3', {}).get('move_avg_volume', 0):.0f} (consolidation < move)
+   • Daily Range: {'✅' if criteria_details.get('criterion2_3', {}).get('range_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_avg_adr', 0):.1f}% vs {criteria_details.get('criterion2_3', {}).get('move_avg_adr', 0):.1f}% (consolidation < move)
+   • Price Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('price_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('price_difference_adr', 0):.1f}% difference (need ≤{criteria_details.get('criterion2_3', {}).get('current_adr_20', 0):.1f}% 20-day ADR)
 
 4. MA10 TOLERANCE (3-4% proximity):
    Status: {'✅ PASSED' if criteria_details.get('criterion4', {}).get('met', False) else '❌ FAILED'}
@@ -1440,24 +1628,37 @@ with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in 
                 row=2, col=1
             )
             
-            # Add criteria highlights
-            if criteria_met['large_move']:
-                fig.add_vrect(
-                    x0=df_plot.index[0], x1=df_plot.index[-1],
-                    fillcolor="green", opacity=0.1,
-                    layer="below", line_width=0,
-                    annotation_text="Large Move ✓",
-                    annotation_position="top left"
-                )
-            
-            if criteria_met['consolidation']:
-                fig.add_vrect(
-                    x0=df_plot.index[-15], x1=df_plot.index[-1],
-                    fillcolor="blue", opacity=0.1,
-                    layer="below", line_width=0,
-                    annotation_text="Consolidation ✓",
-                    annotation_position="top right"
-                )
+            # Highlight move up period and consolidation period using move boundaries
+            if criteria_details.get('criterion1', {}).get('start_candle', -1) != -1 and criteria_details.get('criterion1', {}).get('end_candle', -1) != -1:
+                start_candle = criteria_details['criterion1']['start_candle']
+                end_candle = criteria_details['criterion1']['end_candle']
+                
+                # Convert candle indices to plot indices (accounting for the 200-day limit)
+                plot_start_idx = max(0, start_candle - (len(hist) - len(df_plot)))
+                plot_end_idx = max(0, end_candle - (len(hist) - len(df_plot)))
+                
+                if plot_start_idx < len(df_plot) and plot_end_idx < len(df_plot):
+                    # Add move up period highlighting (light green)
+                    fig.add_vrect(
+                        x0=df_plot.index[plot_start_idx], 
+                        x1=df_plot.index[plot_end_idx],
+                        fillcolor="lightgreen", 
+                        opacity=0.3,
+                        layer="below", 
+                        line_width=0
+                    )
+                    
+                    # Add consolidation period highlighting (light blue)
+                    consolidation_start_idx = plot_end_idx + 1
+                    if consolidation_start_idx < len(df_plot):
+                        fig.add_vrect(
+                            x0=df_plot.index[consolidation_start_idx], 
+                            x1=df_plot.index[-1],
+                            fillcolor="lightblue", 
+                            opacity=0.3,
+                            layer="below", 
+                            line_width=0
+                        )
             
             # Add move boundary indicators if available
             if criteria_details.get('criterion1', {}).get('start_candle', -1) != -1:
@@ -1470,63 +1671,45 @@ with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in 
                 plot_end_idx = max(0, end_candle - (len(hist) - len(df_plot)))
                 
                 if plot_start_idx < len(df_plot) and plot_end_idx < len(df_plot):
-                    # Add start marker
+                    # Add start marker (green triangle up)
                     fig.add_trace(
                         go.Scatter(
                             x=[df_plot.index[plot_start_idx]],
                             y=[df_plot.iloc[plot_start_idx]['Low'] * 0.98],  # Slightly below the low
-                            mode='markers+text',
+                            mode='markers',
                             marker=dict(
                                 symbol='triangle-up',
                                 size=15,
                                 color='#10b981',
                                 line=dict(color='white', width=2)
                             ),
-                            text=['MOVE START'],
-                            textposition='bottom center',
-                            textfont=dict(color='white', size=10, family='Arial Black'),
                             name='Move Start',
                             showlegend=False,
-                            hovertemplate='<b>Move Start</b><br>Date: %{x}<br>Price: $%{y:.2f}<br>Volume: %{text}<extra></extra>'
+                            hovertemplate='<b>Move Start</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>'
                         ),
                         row=1, col=1
                     )
                     
-                    # Add end marker
+                    # Add end marker (red triangle down)
                     fig.add_trace(
                         go.Scatter(
                             x=[df_plot.index[plot_end_idx]],
                             y=[df_plot.iloc[plot_end_idx]['High'] * 1.02],  # Slightly above the high
-                            mode='markers+text',
+                            mode='markers',
                             marker=dict(
                                 symbol='triangle-down',
                                 size=15,
                                 color='#ef4444',
                                 line=dict(color='white', width=2)
                             ),
-                            text=['MOVE END'],
-                            textposition='top center',
-                            textfont=dict(color='white', size=10, family='Arial Black'),
                             name='Move End',
                             showlegend=False,
-                            hovertemplate='<b>Move End</b><br>Date: %{x}<br>Price: $%{y:.2f}<br>Move: %{text}<extra></extra>'
+                            hovertemplate='<b>Move End</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>'
                         ),
                         row=1, col=1
                     )
                     
-                    # Add move label at the bottom (no shading)
-                    fig.add_annotation(
-                        x=df_plot.index[plot_start_idx + (plot_end_idx - plot_start_idx) // 2],  # Center of the move
-                        y=df_plot.iloc[plot_start_idx:plot_end_idx+1]['Low'].min() * 0.95,  # Below the lowest point
-                        text=f"Momentum Move ({move_details.get('total_move_pct', 0):.1f}%)",
-                        showarrow=False,
-                        font=dict(color="orange", size=12, family="Arial Black"),
-                        bgcolor="rgba(0,0,0,0.7)",
-                        bordercolor="orange",
-                        borderwidth=1,
-                        xanchor="center",
-                        yanchor="top"
-                    )
+
             
             # Update layout for dark theme
             fig.update_layout(
@@ -1788,6 +1971,99 @@ async def get_result(result_id: str):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move_end_idx: int) -> tuple[bool, dict]:
+    """
+    New consolidation pattern detection based on 4 criteria:
+    1. Number of candles in consolidation >= 3
+    2. Average volume during consolidation < average volume during move up
+    3. Average daily range during consolidation < average daily range during move up  
+    4. Most recent candle is at most 1 ADR away from first consolidation candle
+    
+    Args:
+        df: DataFrame with OHLCV data
+        move_start_idx: Start index of the move up period
+        move_end_idx: End index of the move up period
+    
+    Returns:
+        tuple: (consolidation_found, consolidation_details)
+    """
+    if move_start_idx == -1 or move_end_idx == -1:
+        return False, {}
+    
+    # Consolidation period starts after the move up ends
+    consolidation_start_idx = move_end_idx + 1
+    
+    # Check if we have enough data for consolidation
+    if consolidation_start_idx >= len(df):
+        return False, {}
+    
+    # Get consolidation period data
+    consolidation_data = df.iloc[consolidation_start_idx:]
+    
+    # Criterion 1: Number of candles in consolidation >= 3
+    consolidation_candles = len(consolidation_data)
+    if consolidation_candles < 3:
+        return False, {
+            'met': False,
+            'reason': f'Only {consolidation_candles} candles in consolidation (need >= 3)',
+            'consolidation_candles': consolidation_candles
+        }
+    
+    # Get move up period data
+    move_data = df.iloc[move_start_idx:move_end_idx + 1]
+    
+    # Calculate ADR for the move up period
+    move_daily_ranges = (move_data['High'] - move_data['Low']) / move_data['Open'] * 100
+    move_avg_adr = move_daily_ranges.mean()
+    
+    # Criterion 2: Average volume during consolidation < average volume during move up
+    move_avg_volume = move_data['Volume'].mean()
+    consolidation_avg_volume = consolidation_data['Volume'].mean()
+    volume_criterion_met = consolidation_avg_volume < move_avg_volume
+    
+    # Criterion 3: Average daily range during consolidation < average daily range during move up
+    consolidation_daily_ranges = (consolidation_data['High'] - consolidation_data['Low']) / consolidation_data['Open'] * 100
+    consolidation_avg_adr = consolidation_daily_ranges.mean()
+    range_criterion_met = consolidation_avg_adr < move_avg_adr
+    
+    # Criterion 4: Most recent candle close is at most 1 ADR away from first consolidation candle close
+    # Use the 20-day ADR that was already calculated
+    current_adr_20 = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0
+    first_consolidation_close = consolidation_data.iloc[0]['Close']
+    most_recent_close = consolidation_data.iloc[-1]['Close']
+    price_difference = abs(most_recent_close - first_consolidation_close)
+    price_difference_adr = price_difference / first_consolidation_close * 100
+    price_criterion_met = price_difference_adr <= current_adr_20
+    
+    # All criteria must be met
+    consolidation_found = (
+        consolidation_candles >= 3 and
+        volume_criterion_met and
+        range_criterion_met and
+        price_criterion_met
+    )
+    
+    consolidation_details = {
+        'met': consolidation_found,
+        'consolidation_candles': consolidation_candles,
+        'consolidation_start_idx': consolidation_start_idx,
+        'consolidation_end_idx': len(df) - 1,
+        'move_avg_volume': round(move_avg_volume, 0),
+        'consolidation_avg_volume': round(consolidation_avg_volume, 0),
+        'volume_criterion_met': volume_criterion_met,
+        'move_avg_adr': round(move_avg_adr, 2),
+        'consolidation_avg_adr': round(consolidation_avg_adr, 2),
+        'range_criterion_met': range_criterion_met,
+        'price_difference_adr': round(price_difference_adr, 2),
+        'price_criterion_met': price_criterion_met,
+        'first_consolidation_close': round(first_consolidation_close, 2),
+        'most_recent_close': round(most_recent_close, 2),
+        'current_adr_20': round(current_adr_20, 2),
+        'description': f"Consolidation: {consolidation_candles} days, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}%, close diff {price_difference_adr:.1f}% (≤{current_adr_20:.1f}%)"
+    }
+    
+    return consolidation_found, consolidation_details
 
 if __name__ == "__main__":
     import uvicorn

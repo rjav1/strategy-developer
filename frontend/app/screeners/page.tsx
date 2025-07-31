@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Search, Filter, Plus, Play, Edit, Trash2, Loader2, TrendingUp, Shield, BarChart3, Info, Star, CheckCircle, XCircle, Target, Zap, Eye, Download } from 'lucide-react'
+import { Search, Filter, Plus, Play, Edit, Trash2, Loader2, TrendingUp, Shield, BarChart3, Info, Star, CheckCircle, XCircle, Target, Zap, Eye, Download, Maximize2, Minimize2, X } from 'lucide-react'
 import StockChart from '../../components/StockChart'
 
 interface ScreenResult {
@@ -94,6 +94,34 @@ export default function Screeners() {
   const [enabledCriteria, setEnabledCriteria] = useState([1,2,3,4,5,6,7,8,9])
   const [fallbackEnabled, setFallbackEnabled] = useState(true)
   const [showAdvancedControls, setShowAdvancedControls] = useState(false)
+  
+  // Progress tracking state
+  const [showProgress, setShowProgress] = useState(false)
+  const [progressPercent, setProgressPercent] = useState(0)
+  const [progressMessage, setProgressMessage] = useState('')
+  const [currentSymbol, setCurrentSymbol] = useState('')
+  const [isMinimized, setIsMinimized] = useState(false)
+  const [abortController, setAbortController] = useState<AbortController | null>(null)
+  
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1)
+  const [itemsPerPage, setItemsPerPage] = useState(50)
+  const [allResults, setAllResults] = useState<ScreenResult[]>([])
+
+  // Handle Escape key to close modals
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowMomentumModal(false)
+        setSelectedStock(null)
+      }
+    }
+
+    document.addEventListener('keydown', handleEscape)
+    return () => {
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [])
 
   const runScreener = async (type: 'momentum' | 'volatility') => {
     setLoading(true)
@@ -101,12 +129,23 @@ export default function Screeners() {
     setScreenerType(type)
     setResults([])
     
+    // Setup progress tracking
+    setShowProgress(true)
+    setProgressPercent(0)
+    setProgressMessage('Initializing screener...')
+    setCurrentSymbol('')
+    setIsMinimized(false)
+    
+    // Create abort controller for cancellation
+    const controller = new AbortController()
+    setAbortController(controller)
+    
     try {
       if (type === 'momentum') {
-        // Use new momentum screening API
+        // Use new streaming momentum screening API
         const symbols = customSymbols.trim() 
           ? customSymbols.split(',').map(s => s.trim().toUpperCase())
-          : ['AAPL', 'MSFT', 'TSLA', 'NVDA', 'GOOGL', 'AMZN', 'META', 'NFLX', 'AMD', 'INTC']
+          : undefined // Let backend use full stock list
         
         const requestBody = {
           symbols: symbols,
@@ -126,21 +165,86 @@ export default function Screeners() {
           }
         }
 
-        const response = await fetch('http://localhost:8000/screen_momentum', {
+        // Use streaming endpoint for real-time progress
+        const response = await fetch('http://localhost:8000/screen_momentum_stream', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(requestBody)
+          body: JSON.stringify(requestBody),
+          signal: controller.signal
         })
         
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`)
         }
         
-        const data = await response.json()
-        setResults(data)
-        generateAnalysis(data, type)
+        const reader = response.body?.getReader()
+        const decoder = new TextDecoder()
+        const results: ScreenResult[] = []
+        let buffer = ''
+        
+            // Reset pagination when starting new screening
+    setCurrentPage(1)
+    setAllResults([])
+    setResults([])
+        
+        if (reader) {
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              
+              buffer += decoder.decode(value, { stream: true })
+              const lines = buffer.split('\n')
+              
+              // Keep the last line in buffer as it might be incomplete
+              buffer = lines.pop() || ''
+              
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  try {
+                    const data = JSON.parse(line.slice(6))
+                    console.log('Received SSE data:', data) // Debug log
+                    
+                    if (data.type === 'progress') {
+                      setProgressPercent(data.percent)
+                      setProgressMessage(data.message)
+                      setCurrentSymbol(data.current_symbol || '')
+                    } else if (data.type === 'result') {
+                      results.push(data.result)
+                      // Auto-sort results by criteria met (descending) and pattern strength
+                      const sortedResults = [...results].sort((a, b) => {
+                        if (a.total_met !== b.total_met) {
+                          return b.total_met - a.total_met // Higher criteria met first
+                        }
+                        // If same criteria met, sort by pattern strength
+                        const strengthOrder = { 'Strong': 3, 'Moderate': 2, 'Weak': 1, 'Very Weak': 0 }
+                        return strengthOrder[b.pattern_strength as keyof typeof strengthOrder] - strengthOrder[a.pattern_strength as keyof typeof strengthOrder]
+                      })
+                      setAllResults(sortedResults)
+                      setResults(sortedResults.slice(0, itemsPerPage)) // Show first page
+                    } else if (data.type === 'complete') {
+                      setProgressMessage('Screening completed!')
+                      setProgressPercent(100)
+                      generateAnalysis(allResults, type)
+                    } else if (data.type === 'error') {
+                      console.error('Screening error:', data.error)
+                    }
+                  } catch (e) {
+                    console.error('Error parsing SSE data:', e, 'Line:', line)
+                  }
+                }
+              }
+            }
+          } catch (error: any) {
+            if (error.name === 'AbortError') {
+              console.log('Screening was cancelled')
+            } else {
+              throw error
+            }
+          }
+        }
         
       } else {
         // Use existing volatility screening API
@@ -160,15 +264,28 @@ export default function Screeners() {
         }
         
         const data = await response.json()
-        setResults(data)
+        setAllResults(data)
+        setResults(data.slice(0, itemsPerPage))
         generateAnalysis(data, type)
       }
       
     } catch (err) {
-      setError(`Failed to run screener: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      if (err instanceof Error && err.name === 'AbortError') {
+        setError('Screening was cancelled')
+      } else {
+        setError(`Failed to run screener: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      }
       setResults([])
     } finally {
       setLoading(false)
+      // Hide progress popup after a short delay to show completion
+      setTimeout(() => {
+        setShowProgress(false)
+        setProgressPercent(0)
+        setProgressMessage('')
+        setCurrentSymbol('')
+        setAbortController(null)
+      }, 500)
     }
   }
 
@@ -322,6 +439,23 @@ export default function Screeners() {
     URL.revokeObjectURL(url)
   }
 
+  // Pagination functions
+  const totalPages = Math.ceil(allResults.length / itemsPerPage)
+  const startIndex = (currentPage - 1) * itemsPerPage
+  const endIndex = startIndex + itemsPerPage
+  const currentResults = allResults.slice(startIndex, endIndex)
+
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page)
+    setResults(allResults.slice((page - 1) * itemsPerPage, page * itemsPerPage))
+  }
+
+  const handleItemsPerPageChange = (newItemsPerPage: number) => {
+    setItemsPerPage(newItemsPerPage)
+    setCurrentPage(1) // Reset to first page
+    setResults(allResults.slice(0, newItemsPerPage))
+  }
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
@@ -406,7 +540,7 @@ export default function Screeners() {
               <div className="grid grid-cols-3 gap-3">
                 {[
                   { id: 1, name: "Large Move (30%+)" },
-                  { id: 2, name: "Consolidation" },
+                  { id: 2, name: "Consolidation (New 4-Criteria)" },
                   { id: 3, name: "Narrow Range" },
                   { id: 4, name: "Above MAs" },
                   { id: 5, name: "Volume Spike" },
@@ -450,15 +584,14 @@ export default function Screeners() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Max Consolidation % <span className="text-xs">(Criterion 2)</span>
+                  Consolidation Criteria <span className="text-xs">(Criterion 2)</span>
                 </label>
-                <input 
-                  type="number" 
-                  value={maxConsolidationRange} 
-                  onChange={(e) => setMaxConsolidationRange(parseFloat(e.target.value) || 10)}
-                  min="5" max="25" step="2.5"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
-                />
+                <div className="text-xs text-muted-foreground mb-2">
+                  • ≥3 candles • Lower volume • Lower ADR • Price stability
+                </div>
+                <div className="text-xs text-gray-500">
+                  (New 4-criteria consolidation detection)
+                </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-muted-foreground mb-2">
@@ -642,15 +775,32 @@ export default function Screeners() {
       )}
 
       {/* Results Display */}
-      {results.length > 0 && (
+      {allResults.length > 0 && (
         <div className="card-glow p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold text-white">
               {screenerType === 'momentum' ? '5 Star Momentum Patterns' : 'Low Volatility'} Results
             </h2>
-            <span className="text-sm text-muted-foreground">
-              {results.length} results
-            </span>
+            <div className="flex items-center gap-4">
+              <span className="text-sm text-muted-foreground">
+                {allResults.length} total results
+              </span>
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-muted-foreground">Show:</label>
+                <select 
+                  value={itemsPerPage} 
+                  onChange={(e) => handleItemsPerPageChange(parseInt(e.target.value))}
+                  className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-sm text-white"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={allResults.length}>All</option>
+                </select>
+                <span className="text-sm text-muted-foreground">per page</span>
+              </div>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -670,9 +820,9 @@ export default function Screeners() {
                 </tr>
               </thead>
               <tbody>
-                {results.map((result, index) => (
+                {currentResults.map((result, index) => (
                   <tr key={result.symbol} className="border-b border-gray-800 hover:bg-gray-800/50">
-                    <td className="p-3 text-white font-medium">#{index + 1}</td>
+                    <td className="p-3 text-white font-medium">#{startIndex + index + 1}</td>
                     <td className="p-3 text-white font-mono">{result.symbol}</td>
                     <td className="p-3 text-muted-foreground">{result.name || result.symbol}</td>
                     <td className={`p-3 font-medium ${
@@ -713,13 +863,47 @@ export default function Screeners() {
               </tbody>
             </table>
           </div>
+          
+          {/* Pagination Controls */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between mt-6 pt-4 border-t border-gray-700">
+              <div className="text-sm text-muted-foreground">
+                Showing {startIndex + 1} to {Math.min(endIndex, allResults.length)} of {allResults.length} results
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handlePageChange(currentPage - 1)}
+                  disabled={currentPage === 1}
+                  className="px-3 py-1 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 text-white rounded text-sm transition-colors"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-muted-foreground">
+                  Page {currentPage} of {totalPages}
+                </span>
+                <button
+                  onClick={() => handlePageChange(currentPage + 1)}
+                  disabled={currentPage === totalPages}
+                  className="px-3 py-1 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 text-white rounded text-sm transition-colors"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* Momentum Analysis Modal */}
       {showMomentumModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 rounded-xl w-full max-w-6xl max-h-[95vh] overflow-y-auto">
+        <div 
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowMomentumModal(false)}
+        >
+          <div 
+            className="bg-gray-900 rounded-xl w-full max-w-6xl max-h-[95vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
                 <div>
@@ -833,7 +1017,7 @@ export default function Screeners() {
                         {Object.entries(momentumAnalysis.criteria_met).map(([key, met], index) => {
                           const criterionNames = {
                             'large_move': 'Large Move (30%+)',
-                            'consolidation': 'Consolidation Pattern',
+                            'consolidation': 'Consolidation Pattern (New 4-Criteria)',
                             'ma10_tolerance': 'MA10 Tolerance',
                             'reconsolidation': 'Reconsolidation',
                             'linear_moves': 'Linear Moves',
@@ -841,7 +1025,7 @@ export default function Screeners() {
                           };
                           const descriptions = {
                             'large_move': 'Significant price move prior to consolidation',
-                            'consolidation': 'Tight range with volume/range constraints',
+                            'consolidation': '4 criteria: ≥3 candles, lower volume, lower ADR, price stability',
                             'ma10_tolerance': 'Price near 10-day moving average',
                             'reconsolidation': 'Volume control after breakout',
                             'linear_moves': 'High R² correlation for linear trend',
@@ -893,8 +1077,14 @@ export default function Screeners() {
 
       {/* Stock Chart Modal */}
       {selectedStock && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-900 rounded-xl p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+        <div 
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={() => setSelectedStock(null)}
+        >
+          <div 
+            className="bg-gray-900 rounded-xl p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="text-xl font-semibold text-white">{selectedStock.symbol}</h2>
@@ -1062,6 +1252,117 @@ export default function Screeners() {
           </div>
         </div>
       </div>
+
+      {/* Progress Popup */}
+      {showProgress && !isMinimized && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-white">Screening Progress</h3>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setIsMinimized(true)}
+                  className="p-1 hover:bg-gray-700 rounded transition-colors"
+                  title="Minimize"
+                >
+                  <Minimize2 className="h-4 w-4 text-gray-400" />
+                </button>
+                <button
+                  onClick={() => {
+                    if (abortController) {
+                      abortController.abort()
+                    }
+                    setShowProgress(false)
+                    setProgressPercent(0)
+                    setProgressMessage('')
+                    setAbortController(null)
+                  }}
+                  className="p-1 hover:bg-red-500/20 rounded transition-colors"
+                  title="Cancel"
+                >
+                  <X className="h-4 w-4 text-red-400" />
+                </button>
+              </div>
+            </div>
+            
+            <div className="mb-4">
+              <div className="flex justify-between text-sm text-gray-400 mb-2">
+                <span>{progressMessage}</span>
+                <span>{progressPercent}%</span>
+              </div>
+              <div className="w-full bg-gray-700 rounded-full h-2">
+                <div 
+                  className="bg-blue-500 h-2 rounded-full transition-all duration-300 ease-out"
+                  style={{ width: `${progressPercent}%` }}
+                ></div>
+              </div>
+              {currentSymbol && (
+                <div className="mt-2 text-sm text-blue-400 font-mono">
+                  Current: {currentSymbol}
+                </div>
+              )}
+            </div>
+            
+            {progressPercent < 100 && (
+              <div className="text-center">
+                <Loader2 className="h-6 w-6 animate-spin text-blue-400 mx-auto mb-2" />
+                <p className="text-sm text-gray-400">Please wait while we screen the stock universe...</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Minimized Progress Bar */}
+      {showProgress && isMinimized && (
+        <div className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 p-3 z-50">
+          <div className="flex items-center justify-between max-w-4xl mx-auto">
+            <div className="flex items-center gap-4 flex-1">
+              <div className="flex-1">
+                <div className="flex justify-between text-sm text-gray-400 mb-1">
+                  <span>{progressMessage}</span>
+                  <span>{progressPercent}%</span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2">
+                  <div 
+                    className="bg-blue-500 h-2 rounded-full transition-all duration-300 ease-out"
+                    style={{ width: `${progressPercent}%` }}
+                  ></div>
+                </div>
+                {currentSymbol && (
+                  <div className="text-xs text-blue-400 font-mono mt-1">
+                    Current: {currentSymbol}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2 ml-4">
+              <button
+                onClick={() => setIsMinimized(false)}
+                className="px-3 py-1 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded text-sm transition-colors"
+                title="Expand"
+              >
+                <Maximize2 className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => {
+                  if (abortController) {
+                    abortController.abort()
+                  }
+                  setShowProgress(false)
+                  setProgressPercent(0)
+                  setProgressMessage('')
+                  setAbortController(null)
+                }}
+                className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded text-sm transition-colors"
+                title="Cancel"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 } 
