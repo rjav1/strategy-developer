@@ -10,7 +10,8 @@ import {
   Play, 
   BarChart, 
   Settings,
-  TrendingUp
+  TrendingUp,
+  Bookmark
 } from 'lucide-react'
 
 const navigation = [
@@ -19,6 +20,7 @@ const navigation = [
   { name: 'Data Upload', href: '/data-upload', icon: Upload },
   { name: 'Strategies', href: '/strategies', icon: FileText },
   { name: 'Screeners', href: '/screeners', icon: Search },
+  { name: 'Watchlists', href: '/watchlists', icon: Bookmark },
   { name: 'Backtest Engine', href: '/backtest', icon: Play },
   { name: 'Results', href: '/results', icon: BarChart },
   { name: 'Settings', href: '/settings', icon: Settings },

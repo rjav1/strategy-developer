@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Search, Filter, Plus, Play, Edit, Trash2, Loader2, TrendingUp, Shield, BarChart3, Info, Star, CheckCircle, XCircle, Target, Zap, Eye, Download, Maximize2, Minimize2, X } from 'lucide-react'
+import { Search, Filter, Plus, Play, Edit, Trash2, Loader2, TrendingUp, Shield, BarChart3, Info, Star, CheckCircle, XCircle, Target, Zap, Eye, Download, Maximize2, Minimize2, X, Bookmark, CheckSquare, Square } from 'lucide-react'
 import StockChart from '../../components/StockChart'
 
 interface ScreenResult {
@@ -98,6 +98,14 @@ export default function Screeners() {
   // Progress tracking state
   const [showProgress, setShowProgress] = useState(false)
   const [progressPercent, setProgressPercent] = useState(0)
+  
+  // Watchlist state
+  const [watchlists, setWatchlists] = useState<any[]>([])
+  const [selectedStocks, setSelectedStocks] = useState<Set<string>>(new Set())
+  const [showWatchlistModal, setShowWatchlistModal] = useState(false)
+  const [showCreateWatchlistModal, setShowCreateWatchlistModal] = useState(false)
+  const [newWatchlistName, setNewWatchlistName] = useState('')
+  const [newWatchlistDescription, setNewWatchlistDescription] = useState('')
   const [progressMessage, setProgressMessage] = useState('')
   const [currentSymbol, setCurrentSymbol] = useState('')
   const [isMinimized, setIsMinimized] = useState(false)
@@ -456,6 +464,64 @@ export default function Screeners() {
     setResults(allResults.slice(0, newItemsPerPage))
   }
 
+  // Watchlist functions
+  const toggleStockSelection = (symbol: string) => {
+    const newSelected = new Set(selectedStocks)
+    if (newSelected.has(symbol)) {
+      newSelected.delete(symbol)
+    } else {
+      newSelected.add(symbol)
+    }
+    setSelectedStocks(newSelected)
+  }
+
+  const selectAllStocks = () => {
+    const allSymbols = allResults.map(result => result.symbol)
+    setSelectedStocks(new Set(allSymbols))
+  }
+
+  const deselectAllStocks = () => {
+    setSelectedStocks(new Set())
+  }
+
+  const addStocksToWatchlist = (watchlistId: string) => {
+    const watchlist = watchlists.find(w => w.id === watchlistId)
+    if (!watchlist) return
+
+    const symbolsToAdd = Array.from(selectedStocks)
+    const updatedWatchlist = {
+      ...watchlist,
+      symbols: [...new Set([...watchlist.symbols, ...symbolsToAdd])],
+      updatedAt: new Date().toISOString()
+    }
+
+    const updatedWatchlists = watchlists.map(w => 
+      w.id === watchlistId ? updatedWatchlist : w
+    )
+    setWatchlists(updatedWatchlists)
+    setShowWatchlistModal(false)
+    setSelectedStocks(new Set())
+  }
+
+  const createWatchlist = () => {
+    if (!newWatchlistName.trim()) return
+
+    const newWatchlist = {
+      id: Date.now().toString(),
+      name: newWatchlistName.trim(),
+      description: newWatchlistDescription.trim(),
+      symbols: Array.from(selectedStocks),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+
+    setWatchlists([...watchlists, newWatchlist])
+    setNewWatchlistName('')
+    setNewWatchlistDescription('')
+    setShowCreateWatchlistModal(false)
+    setSelectedStocks(new Set())
+  }
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
@@ -803,10 +869,78 @@ export default function Screeners() {
             </div>
           </div>
 
+          {/* Watchlist Actions */}
+          {selectedStocks.size > 0 && (
+            <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <span className="text-sm text-blue-400">
+                    {selectedStocks.size} stock{selectedStocks.size !== 1 ? 's' : ''} selected
+                  </span>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setShowWatchlistModal(true)}
+                      className="flex items-center gap-2 px-3 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors"
+                    >
+                      <Bookmark className="h-4 w-4" />
+                      Add to Watchlist
+                    </button>
+                    <button
+                      onClick={() => setShowCreateWatchlistModal(true)}
+                      className="flex items-center gap-2 px-3 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg transition-colors"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Create New Watchlist
+                    </button>
+                  </div>
+                </div>
+                <button
+                  onClick={deselectAllStocks}
+                  className="text-sm text-muted-foreground hover:text-white transition-colors"
+                >
+                  Clear Selection
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Selection Controls */}
+          <div className="mb-4 flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={selectAllStocks}
+                className="flex items-center gap-2 px-3 py-2 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded-lg transition-colors"
+              >
+                <CheckSquare className="h-4 w-4" />
+                Select All
+              </button>
+              <button
+                onClick={deselectAllStocks}
+                className="flex items-center gap-2 px-3 py-2 bg-gray-500/20 hover:bg-gray-500/30 text-gray-400 rounded-lg transition-colors"
+              >
+                <Square className="h-4 w-4" />
+                Deselect All
+              </button>
+            </div>
+            {selectedStocks.size > 0 && (
+              <span className="text-sm text-muted-foreground">
+                {selectedStocks.size} of {allResults.length} selected
+              </span>
+            )}
+          </div>
+
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-700">
+                  <th className="text-left p-3 text-muted-foreground font-medium">
+                    <input
+                      type="checkbox"
+                      checked={selectedStocks.size === allResults.length && allResults.length > 0}
+                      onChange={(e) => e.target.checked ? selectAllStocks() : deselectAllStocks()}
+                      className="rounded border-gray-600 bg-gray-800 text-purple-500 focus:ring-purple-500"
+                    />
+                  </th>
                   <th className="text-left p-3 text-muted-foreground font-medium">Rank</th>
                   <th className="text-left p-3 text-muted-foreground font-medium">Symbol</th>
                   <th className="text-left p-3 text-muted-foreground font-medium">Company</th>
@@ -822,6 +956,14 @@ export default function Screeners() {
               <tbody>
                 {currentResults.map((result, index) => (
                   <tr key={result.symbol} className="border-b border-gray-800 hover:bg-gray-800/50">
+                    <td className="p-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedStocks.has(result.symbol)}
+                        onChange={() => toggleStockSelection(result.symbol)}
+                        className="rounded border-gray-600 bg-gray-800 text-purple-500 focus:ring-purple-500"
+                      />
+                    </td>
                     <td className="p-3 text-white font-medium">#{startIndex + index + 1}</td>
                     <td className="p-3 text-white font-mono">{result.symbol}</td>
                     <td className="p-3 text-muted-foreground">{result.name || result.symbol}</td>
@@ -1358,6 +1500,127 @@ export default function Screeners() {
                 title="Cancel"
               >
                 <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add to Watchlist Modal */}
+      {showWatchlistModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
+            <h3 className="text-lg font-semibold text-white mb-4">
+              Add {selectedStocks.size} Stock{selectedStocks.size !== 1 ? 's' : ''} to Watchlist
+            </h3>
+            
+            {watchlists.length === 0 ? (
+              <div className="text-center py-6">
+                <Bookmark className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                <p className="text-muted-foreground mb-4">No watchlists found</p>
+                <button
+                  onClick={() => {
+                    setShowWatchlistModal(false)
+                    setShowCreateWatchlistModal(true)
+                  }}
+                  className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition-colors"
+                >
+                  Create First Watchlist
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {watchlists.map((watchlist) => (
+                  <button
+                    key={watchlist.id}
+                    onClick={() => addStocksToWatchlist(watchlist.id)}
+                    className="w-full p-3 text-left bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors"
+                  >
+                    <div className="font-medium text-white">{watchlist.name}</div>
+                    <div className="text-sm text-muted-foreground">
+                      {watchlist.symbols.length} symbols
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowWatchlistModal(false)}
+                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              {watchlists.length > 0 && (
+                <button
+                  onClick={() => {
+                    setShowWatchlistModal(false)
+                    setShowCreateWatchlistModal(true)
+                  }}
+                  className="flex-1 px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition-colors"
+                >
+                  Create New Watchlist
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Watchlist Modal */}
+      {showCreateWatchlistModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
+            <h3 className="text-lg font-semibold text-white mb-4">Create New Watchlist</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-muted-foreground mb-2">
+                  Name
+                </label>
+                <input
+                  type="text"
+                  value={newWatchlistName}
+                  onChange={(e) => setNewWatchlistName(e.target.value)}
+                  placeholder="Enter watchlist name"
+                  className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-muted-foreground mb-2">
+                  Description (Optional)
+                </label>
+                <textarea
+                  value={newWatchlistDescription}
+                  onChange={(e) => setNewWatchlistDescription(e.target.value)}
+                  placeholder="Enter description"
+                  rows={3}
+                  className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
+                />
+              </div>
+
+              <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                <p className="text-sm text-blue-400">
+                  This watchlist will contain {selectedStocks.size} stock{selectedStocks.size !== 1 ? 's' : ''} from your screening results.
+                </p>
+              </div>
+            </div>
+            
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowCreateWatchlistModal(false)}
+                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={createWatchlist}
+                disabled={!newWatchlistName.trim()}
+                className="flex-1 px-4 py-2 bg-purple-500 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors"
+              >
+                Create
               </button>
             </div>
           </div>

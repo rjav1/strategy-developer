@@ -48,6 +48,38 @@ strategies = {}
 uploaded_data = {}
 backtest_results = {}
 
+# Load built-in strategies
+def load_builtin_strategies():
+    """Load built-in strategies"""
+    try:
+        # Import the breakout strategy
+        import sys
+        import os
+        sys.path.append(os.path.join(os.path.dirname(__file__), 'strategies'))
+        
+        from breakout_strategy import get_strategy_info
+        
+        strategy_info = get_strategy_info()
+        strategy_id = "breakout_strategy"
+        
+        strategies[strategy_id] = {
+            'id': strategy_id,
+            'name': 'Breakout Strategy',
+            'type': 'builtin',
+            'description': strategy_info['metadata']['description'],
+            'timeframe': strategy_info['metadata']['timeframe'],
+            'config': strategy_info['config'],
+            'loaded_at': datetime.now().isoformat()
+        }
+        
+        print(f"Loaded built-in strategy: {strategy_info['metadata']['name']}")
+        
+    except Exception as e:
+        print(f"Error loading built-in strategies: {e}")
+
+# Load built-in strategies on startup
+load_builtin_strategies()
+
 class TickerData(BaseModel):
     symbol: str
     name: str
