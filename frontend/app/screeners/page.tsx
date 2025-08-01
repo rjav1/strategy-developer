@@ -3,6 +3,9 @@
 import { useState, useEffect } from 'react'
 import { Search, Filter, Plus, Play, Edit, Trash2, Loader2, TrendingUp, Shield, BarChart3, Info, Star, CheckCircle, XCircle, Target, Zap, Eye, Download, Maximize2, Minimize2, X, Bookmark, CheckSquare, Square } from 'lucide-react'
 import StockChart from '../../components/StockChart'
+import WatchlistButton from '../../components/WatchlistButton'
+import { useWatchlist } from '../providers/WatchlistProvider'
+import { useScreener } from '../providers/ScreenerProvider'
 
 interface ScreenResult {
   symbol: string
@@ -63,8 +66,27 @@ interface MomentumAnalysisResult {
 }
 
 export default function Screeners() {
-  const [loading, setLoading] = useState(false)
-  const [results, setResults] = useState<ScreenResult[]>([])
+  // Watchlist functionality is now handled by WatchlistButton component
+  const { 
+    results, 
+    setResults, 
+    clearResults, 
+    lastScreenerParams, 
+    setLastScreenerParams,
+    selectedStocks,
+    allSelected,
+    toggleStockSelection,
+    toggleSelectAll,
+    selectAllStocks,
+    deselectAllStocks,
+    clearSelection,
+    loading,
+    setLoading,
+    setError: setScreenerError
+  } = useScreener()
+  
+  const { watchlists, addToWatchlist, createWatchlist: createWatchlistProvider } = useWatchlist()
+  
   const [screenerType, setScreenerType] = useState<'momentum' | 'volatility' | null>(null)
   const [error, setError] = useState('')
   const [selectedStock, setSelectedStock] = useState<StockData | null>(null)
@@ -99,9 +121,7 @@ export default function Screeners() {
   const [showProgress, setShowProgress] = useState(false)
   const [progressPercent, setProgressPercent] = useState(0)
   
-  // Watchlist state
-  const [watchlists, setWatchlists] = useState<any[]>([])
-  const [selectedStocks, setSelectedStocks] = useState<Set<string>>(new Set())
+  // Modal state
   const [showWatchlistModal, setShowWatchlistModal] = useState(false)
   const [showCreateWatchlistModal, setShowCreateWatchlistModal] = useState(false)
   const [newWatchlistName, setNewWatchlistName] = useState('')
@@ -115,6 +135,23 @@ export default function Screeners() {
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage, setItemsPerPage] = useState(50)
   const [allResults, setAllResults] = useState<ScreenResult[]>([])
+
+  // Watchlist functionality moved to WatchlistButton component
+
+  // Load previous screening parameters on mount
+  useEffect(() => {
+    if (lastScreenerParams) {
+      setCustomSymbols(lastScreenerParams.customSymbols || '')
+      setMinPercentageMove(lastScreenerParams.minPercentageMove || 30.0)
+      setMaxConsolidationRange(lastScreenerParams.maxConsolidationRange || 10.0)
+      setCorrelationThreshold(lastScreenerParams.correlationThreshold || 0.7)
+      setVolatilityThreshold(lastScreenerParams.volatilityThreshold || 0.05)
+      setMinCriteria(lastScreenerParams.minCriteria || 3)
+      setTopN(lastScreenerParams.topN || 20)
+      setPeriod(lastScreenerParams.period || '6mo')
+      setScreenerType(lastScreenerParams.type || null)
+    }
+  }, [lastScreenerParams])
 
   // Handle Escape key to close modals
   useEffect(() => {
@@ -134,8 +171,10 @@ export default function Screeners() {
   const runScreener = async (type: 'momentum' | 'volatility') => {
     setLoading(true)
     setError('')
+    setScreenerError(null)
     setScreenerType(type)
     setResults([])
+    clearSelection()
     
     // Setup progress tracking
     setShowProgress(true)
@@ -150,6 +189,19 @@ export default function Screeners() {
     
     try {
       if (type === 'momentum') {
+        // Save screening parameters for persistence
+        const screeningParams = {
+          type,
+          customSymbols,
+          minPercentageMove,
+          maxConsolidationRange,
+          correlationThreshold,
+          volatilityThreshold,
+          minCriteria,
+          topN,
+          period
+        }
+        setLastScreenerParams(screeningParams)
         // Use new streaming momentum screening API
         const symbols = customSymbols.trim() 
           ? customSymbols.split(',').map(s => s.trim().toUpperCase())
@@ -464,62 +516,45 @@ export default function Screeners() {
     setResults(allResults.slice(0, newItemsPerPage))
   }
 
-  // Watchlist functions
-  const toggleStockSelection = (symbol: string) => {
-    const newSelected = new Set(selectedStocks)
-    if (newSelected.has(symbol)) {
-      newSelected.delete(symbol)
-    } else {
-      newSelected.add(symbol)
-    }
-    setSelectedStocks(newSelected)
-  }
+  // Watchlist functions - now handled by context
 
-  const selectAllStocks = () => {
-    const allSymbols = allResults.map(result => result.symbol)
-    setSelectedStocks(new Set(allSymbols))
-  }
-
-  const deselectAllStocks = () => {
-    setSelectedStocks(new Set())
-  }
-
-  const addStocksToWatchlist = (watchlistId: string) => {
-    const watchlist = watchlists.find(w => w.id === watchlistId)
-    if (!watchlist) return
-
+  const addStocksToWatchlist = async (watchlistId: string) => {
     const symbolsToAdd = Array.from(selectedStocks)
-    const updatedWatchlist = {
-      ...watchlist,
-      symbols: Array.from(new Set([...watchlist.symbols, ...symbolsToAdd])),
-      updatedAt: new Date().toISOString()
+    
+    try {
+      // Add each symbol to the watchlist
+      for (const symbol of symbolsToAdd) {
+        await addToWatchlist(symbol, watchlistId)
+      }
+      
+      setShowWatchlistModal(false)
+      clearSelection()
+    } catch (error) {
+      console.error('Error adding stocks to watchlist:', error)
     }
-
-    const updatedWatchlists = watchlists.map(w => 
-      w.id === watchlistId ? updatedWatchlist : w
-    )
-    setWatchlists(updatedWatchlists)
-    setShowWatchlistModal(false)
-    setSelectedStocks(new Set())
   }
 
-  const createWatchlist = () => {
+  const createWatchlist = async () => {
     if (!newWatchlistName.trim()) return
 
-    const newWatchlist = {
-      id: Date.now().toString(),
-      name: newWatchlistName.trim(),
-      description: newWatchlistDescription.trim(),
-      symbols: Array.from(selectedStocks),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+    try {
+      const newWatchlist = await createWatchlistProvider(newWatchlistName.trim(), newWatchlistDescription.trim())
+      
+      if (newWatchlist) {
+        // Add selected stocks to the new watchlist
+        const symbolsToAdd = Array.from(selectedStocks)
+        for (const symbol of symbolsToAdd) {
+          await addToWatchlist(symbol, newWatchlist.id)
+        }
+        
+        setNewWatchlistName('')
+        setNewWatchlistDescription('')
+        setShowCreateWatchlistModal(false)
+        clearSelection()
+      }
+    } catch (error) {
+      console.error('Error creating watchlist:', error)
     }
-
-    setWatchlists([...watchlists, newWatchlist])
-    setNewWatchlistName('')
-    setNewWatchlistDescription('')
-    setShowCreateWatchlistModal(false)
-    setSelectedStocks(new Set())
   }
 
   return (
@@ -817,29 +852,15 @@ export default function Screeners() {
           {selectedStocks.size > 0 && (
             <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <span className="text-sm text-blue-400">
-                    {selectedStocks.size} stock{selectedStocks.size !== 1 ? 's' : ''} selected
-                  </span>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setShowWatchlistModal(true)}
-                      className="flex items-center gap-2 px-3 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors"
-                    >
-                      <Bookmark className="h-4 w-4" />
-                      Add to Watchlist
-                    </button>
-                    <button
-                      onClick={() => setShowCreateWatchlistModal(true)}
-                      className="flex items-center gap-2 px-3 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg transition-colors"
-                    >
-                      <Plus className="h-4 w-4" />
-                      Create New Watchlist
-                    </button>
-                  </div>
-                </div>
                 <button
-                  onClick={deselectAllStocks}
+                  onClick={() => setShowWatchlistModal(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors"
+                >
+                  <Bookmark className="h-4 w-4" />
+                  Add to Watchlist
+                </button>
+                <button
+                  onClick={clearSelection}
                   className="text-sm text-muted-foreground hover:text-white transition-colors"
                 >
                   Clear Selection
@@ -850,22 +871,26 @@ export default function Screeners() {
 
           {/* Selection Controls */}
           <div className="mb-4 flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={selectAllStocks}
-                className="flex items-center gap-2 px-3 py-2 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded-lg transition-colors"
-              >
-                <CheckSquare className="h-4 w-4" />
-                Select All
-              </button>
-              <button
-                onClick={deselectAllStocks}
-                className="flex items-center gap-2 px-3 py-2 bg-gray-500/20 hover:bg-gray-500/30 text-gray-400 rounded-lg transition-colors"
-              >
-                <Square className="h-4 w-4" />
-                Deselect All
-              </button>
-            </div>
+            <button
+              onClick={toggleSelectAll}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+                allSelected
+                  ? 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30'
+                  : 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30'
+              }`}
+            >
+              {allSelected ? (
+                <>
+                  <Square className="h-4 w-4" />
+                  Deselect All
+                </>
+              ) : (
+                <>
+                  <CheckSquare className="h-4 w-4" />
+                  Select All
+                </>
+              )}
+            </button>
             {selectedStocks.size > 0 && (
               <span className="text-sm text-muted-foreground">
                 {selectedStocks.size} of {allResults.length} selected
@@ -878,12 +903,7 @@ export default function Screeners() {
               <thead>
                 <tr className="border-b border-gray-700">
                   <th className="text-left p-3 text-muted-foreground font-medium">
-                    <input
-                      type="checkbox"
-                      checked={selectedStocks.size === allResults.length && allResults.length > 0}
-                      onChange={(e) => e.target.checked ? selectAllStocks() : deselectAllStocks()}
-                      className="rounded border-gray-600 bg-gray-800 text-purple-500 focus:ring-purple-500"
-                    />
+                    Select
                   </th>
                   <th className="text-left p-3 text-muted-foreground font-medium">Rank</th>
                   <th className="text-left p-3 text-muted-foreground font-medium">Symbol</th>
@@ -894,7 +914,7 @@ export default function Screeners() {
                   {screenerType === 'momentum' && (
                     <th className="text-left p-3 text-muted-foreground font-medium">Pattern</th>
                   )}
-                  <th className="text-left p-3 text-muted-foreground font-medium">Actions</th>
+                  <th className="text-center p-3 text-muted-foreground font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -913,7 +933,7 @@ export default function Screeners() {
                     <td className="p-3 text-muted-foreground">{result.name || result.symbol}</td>
                     <td className={`p-3 font-medium ${
                       screenerType === 'momentum' 
-                        ? result.total_met >= 5 ? 'text-green-400' : result.total_met >= 3 ? 'text-yellow-400' : 'text-orange-400'
+                        ? result.total_met >= 4 ? 'text-green-400' : result.total_met >= 3 ? 'text-yellow-400' : 'text-orange-400'
                         : 'text-blue-400'
                     }`}>
                       {formatValue(result, screenerType!)}
@@ -942,6 +962,7 @@ export default function Screeners() {
                             Analyze
                           </button>
                         )}
+                        <WatchlistButton symbol={result.symbol} size="md" />
                       </div>
                     </td>
                   </tr>
@@ -983,7 +1004,7 @@ export default function Screeners() {
       {/* Momentum Analysis Modal */}
       {showMomentumModal && (
         <div 
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9000] p-4"
           onClick={() => setShowMomentumModal(false)}
         >
           <div 
@@ -1056,7 +1077,7 @@ export default function Screeners() {
                     </div>
                     <div className="p-4 bg-gray-800/50 rounded-lg">
                       <h3 className="text-sm font-medium text-muted-foreground mb-2">Criteria Met</h3>
-                      <p className="text-2xl font-bold text-white">{momentumAnalysis.total_criteria_met}/6</p>
+                      <p className="text-2xl font-bold text-white">{momentumAnalysis.total_criteria_met}/4</p>
                     </div>
                   </div>
 
@@ -1160,7 +1181,7 @@ export default function Screeners() {
       {/* Stock Chart Modal */}
       {selectedStock && (
         <div 
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9000]"
           onClick={() => setSelectedStock(null)}
         >
           <div 
@@ -1232,7 +1253,7 @@ export default function Screeners() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="max-w-md">
         <div className="card-glow p-6">
           <div className="flex items-start justify-between mb-4">
             <div className="flex items-center gap-3">
@@ -1245,7 +1266,7 @@ export default function Screeners() {
           </div>
           
           <p className="text-muted-foreground mb-4 text-sm">
-            Advanced momentum screening using the complete 5 Star Trading Setup checklist with 9 technical criteria
+            Advanced momentum screening using the complete 5 Star Trading Setup checklist with 4 technical criteria
           </p>
           
           <div className="flex gap-2">
@@ -1269,75 +1290,11 @@ export default function Screeners() {
             </button>
           </div>
         </div>
-
-        <div className="card-glow p-6">
-          <div className="flex items-start justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <Shield className="h-6 w-6 text-blue-400" />
-              <div>
-                <h3 className="text-lg font-semibold text-white">Low Volatility</h3>
-                <div className="w-3 h-3 rounded-full bg-blue-400"></div>
-              </div>
-            </div>
-          </div>
-          
-          <p className="text-muted-foreground mb-4 text-sm">
-            Screens comprehensive stock universe for lowest volatility stocks with advanced risk metrics
-          </p>
-          
-          <div className="flex gap-2">
-            <button 
-              onClick={() => runScreener('volatility')}
-              disabled={loading}
-              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors disabled:opacity-50"
-            >
-              {loading && screenerType === 'volatility' ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Play className="h-4 w-4" />
-              )}
-              Run
-            </button>
-            <button className="flex items-center justify-center px-3 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors">
-              <Edit className="h-4 w-4" />
-            </button>
-            <button className="flex items-center justify-center px-3 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg transition-colors">
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-
-        <div className="card-glow p-6">
-          <div className="flex items-start justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <Filter className="h-6 w-6 text-purple-400" />
-              <div>
-                <h3 className="text-lg font-semibold text-white">Value Stocks</h3>
-                <div className="w-3 h-3 rounded-full bg-gray-400"></div>
-              </div>
-            </div>
-          </div>
-          
-          <p className="text-muted-foreground mb-4 text-sm">Screens for undervalued stocks (Coming Soon)</p>
-          
-          <div className="flex gap-2">
-            <button className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded-lg transition-colors opacity-50 cursor-not-allowed">
-              <Play className="h-4 w-4" />
-              Coming Soon
-            </button>
-            <button className="flex items-center justify-center px-3 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors">
-              <Edit className="h-4 w-4" />
-            </button>
-            <button className="flex items-center justify-center px-3 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg transition-colors">
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
       </div>
 
       {/* Progress Popup */}
       {showProgress && !isMinimized && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9100] p-4">
           <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-white">Screening Progress</h3>
@@ -1397,7 +1354,7 @@ export default function Screeners() {
 
       {/* Minimized Progress Bar */}
       {showProgress && isMinimized && (
-        <div className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 p-3 z-50">
+        <div className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 p-3 z-[9100]">
           <div className="flex items-center justify-between max-w-4xl mx-auto">
             <div className="flex items-center gap-4 flex-1">
               <div className="flex-1">
@@ -1448,7 +1405,7 @@ export default function Screeners() {
 
       {/* Add to Watchlist Modal */}
       {showWatchlistModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9200] p-4">
           <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
             <h3 className="text-lg font-semibold text-white mb-4">
               Add {selectedStocks.size} Stock{selectedStocks.size !== 1 ? 's' : ''} to Watchlist
@@ -1510,7 +1467,7 @@ export default function Screeners() {
 
       {/* Create Watchlist Modal */}
       {showCreateWatchlistModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9200] p-4">
           <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
             <h3 className="text-lg font-semibold text-white mb-4">Create New Watchlist</h3>
             

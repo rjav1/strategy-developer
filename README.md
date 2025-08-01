@@ -33,6 +33,14 @@ A professional desktop application for traders and quants to upload historical d
 - **Grid Search**: Parameter optimization
 - **Permutation Test**: Signal randomization for validation
 
+### Persistence & State Management
+- **Multiple Watchlists**: Create and manage multiple named watchlists
+- **Unified Watchlist Controls**: Single button interface for adding/removing stocks
+- **Smart Selection**: Toggle buttons for bulk operations in screener
+- **Screener State**: Results and parameters persist across tab switches
+- **Cross-Tab Sync**: Real-time synchronization across all application tabs
+- **Disk Persistence**: All data survives app restarts and browser reloads
+
 ## Installation
 
 ### Prerequisites
@@ -166,6 +174,123 @@ Upload CSV files with the following columns:
 - `Low`: Low price
 - `Close`: Closing price
 - `Volume`: Trading volume
+
+## API Documentation
+
+### Multiple Watchlists Endpoints
+
+The application supports multiple named watchlists with full CRUD operations.
+
+#### GET /watchlists
+Returns all watchlists.
+
+**Response:**
+```json
+{
+  "watchlists": [
+    {
+      "id": "abc123",
+      "name": "Tech Stocks",
+      "symbols": ["AAPL", "MSFT", "GOOGL"],
+      "created_at": "2023-01-01T00:00:00Z",
+      "updated_at": "2023-01-01T12:00:00Z"
+    }
+  ]
+}
+```
+
+#### POST /watchlists
+Create a new empty watchlist.
+
+**Request Body:**
+```json
+{
+  "name": "Tech Stocks"
+}
+```
+
+**Response:** Returns the created watchlist object.
+
+#### POST /watchlists/{id}/symbols
+Add a symbol to a specific watchlist.
+
+**Request Body:**
+```json
+{
+  "symbol": "AAPL"
+}
+```
+
+**Response:** Returns the updated watchlist object.
+
+#### DELETE /watchlists/{id}/symbols/{symbol}
+Remove a symbol from a specific watchlist.
+
+**Response:** Returns the updated watchlist object.
+
+#### DELETE /watchlists/{id}
+Delete an entire watchlist.
+
+**Response:**
+```json
+{
+  "message": "Watchlist deleted successfully"
+}
+```
+
+#### POST /watchlists/{id}/update-prices
+Update stock prices for all symbols in a watchlist.
+
+**Response:**
+```json
+{
+  "watchlist_id": "abc123",
+  "updated_prices": {
+    "AAPL": {
+      "symbol": "AAPL",
+      "current_price": 150.25,
+      "daily_change": 2.35,
+      "daily_change_percent": 1.59,
+      "name": "Apple Inc."
+    }
+  },
+  "timestamp": "2023-01-01T12:00:00Z"
+}
+```
+
+### Legacy Single Watchlist Endpoints
+
+For backward compatibility, the original single watchlist endpoints are still available:
+
+#### GET /watchlist
+Returns the legacy single watchlist.
+
+#### POST /watchlist
+Add symbol to legacy watchlist.
+
+#### DELETE /watchlist/{symbol}
+Remove symbol from legacy watchlist.
+
+### Persistence
+
+#### Multiple Watchlists Persistence
+- Multiple watchlists are stored in `watchlists.json` in the project root
+- Legacy single watchlist stored in `watchlist.json` for backward compatibility
+- Data persists across app restarts and browser reloads
+- All watchlist operations are automatically synced to disk
+- Real-time synchronization across all browser tabs
+
+#### Screener Persistence
+- Screener results are cached in browser localStorage with automatic restoration
+- Screening parameters are preserved across sessions and tab switches
+- Selection state (selected stocks) persists during navigation
+- Results remain available even after browser refresh
+
+#### UI State Management
+- Selected watchlist preference saved in localStorage
+- Responsive design with mobile-friendly touch interactions
+- Unified watchlist buttons with contextual behavior
+- Smart toggle controls for bulk operations
 
 ## Contributing
 

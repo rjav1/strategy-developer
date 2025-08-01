@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import json
 from datetime import datetime, timedelta
 import time
@@ -21,6 +21,7 @@ warnings.filterwarnings('ignore')
 import concurrent.futures
 import requests
 import asyncio
+from pathlib import Path
 
 # Global cache for all NYSE tickers
 nyse_ticker_cache = None
@@ -1129,6 +1130,58 @@ def format_timestamps(timestamps):
             formatted.append(str(ts))
     return formatted
 
+# Watchlist file management
+WATCHLIST_FILE = Path("watchlist.json")  # Legacy single watchlist
+WATCHLISTS_FILE = Path("watchlists.json")  # New multiple watchlists
+
+def load_watchlist() -> List[str]:
+    """Load legacy single watchlist from disk (backward compatibility)"""
+    try:
+        if WATCHLIST_FILE.exists():
+            with open(WATCHLIST_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get('symbols', [])
+        return []
+    except Exception as e:
+        print(f"Error loading watchlist: {e}")
+        return []
+
+def save_watchlist(symbols: List[str]) -> None:
+    """Save legacy single watchlist to disk (backward compatibility)"""
+    try:
+        data = {'symbols': symbols}
+        with open(WATCHLIST_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving watchlist: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save watchlist")
+
+def load_watchlists() -> Dict[str, Any]:
+    """Load all watchlists from disk"""
+    try:
+        if WATCHLISTS_FILE.exists():
+            with open(WATCHLISTS_FILE, 'r') as f:
+                data = json.load(f)
+                return data
+        return {'watchlists': []}
+    except Exception as e:
+        print(f"Error loading watchlists: {e}")
+        return {'watchlists': []}
+
+def save_watchlists(watchlists: Dict[str, Any]) -> None:
+    """Save all watchlists to disk"""
+    try:
+        with open(WATCHLISTS_FILE, 'w') as f:
+            json.dump(watchlists, f, indent=2)
+    except Exception as e:
+        print(f"Error saving watchlists: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save watchlists")
+
+def generate_watchlist_id() -> str:
+    """Generate a unique ID for a new watchlist"""
+    import uuid
+    return str(uuid.uuid4())[:8]
+
 @app.get("/")
 async def root():
     return {"message": "Advanced Momentum Trading Strategy API", "version": "2.0.0"}
@@ -1231,6 +1284,27 @@ async def get_ticker_data(
 class ScreeningRequest(BaseModel):
     symbols: Optional[List[str]] = None
     criteria: MomentumCriteria
+
+class WatchlistSymbol(BaseModel):
+    symbol: str
+
+class WatchlistResponse(BaseModel):
+    symbols: List[str]
+
+class WatchlistCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class WatchlistItem(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    symbols: List[str]
+    created_at: str
+    updated_at: str
+
+class WatchlistsResponse(BaseModel):
+    watchlists: List[WatchlistItem]
 
 @app.post("/screen_momentum", response_model=List[ScreenResult])
 async def screen_momentum(request: ScreeningRequest):
@@ -2045,6 +2119,190 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     }
     
     return consolidation_found, consolidation_details
+
+# Multiple Watchlists endpoints
+@app.get("/watchlists", response_model=WatchlistsResponse)
+async def get_watchlists():
+    """Get all watchlists"""
+    watchlists_data = load_watchlists()
+    watchlists = []
+    for wl_data in watchlists_data.get('watchlists', []):
+        watchlists.append(WatchlistItem(**wl_data))
+    return WatchlistsResponse(watchlists=watchlists)
+
+@app.post("/watchlists", response_model=WatchlistItem)
+async def create_watchlist(watchlist_data: WatchlistCreate):
+    """Create a new empty watchlist"""
+    watchlists_data = load_watchlists()
+    existing_watchlists = watchlists_data.get('watchlists', [])
+    
+    # Check if name already exists
+    for wl in existing_watchlists:
+        if wl.get('name', '').lower() == watchlist_data.name.lower():
+            raise HTTPException(status_code=400, detail="Watchlist name already exists")
+    
+    # Create new watchlist
+    new_id = generate_watchlist_id()
+    now = datetime.now().isoformat()
+    new_watchlist_data = {
+        'id': new_id,
+        'name': watchlist_data.name.strip(),
+        'description': watchlist_data.description.strip() if watchlist_data.description else None,
+        'symbols': [],
+        'created_at': now,
+        'updated_at': now
+    }
+    
+    existing_watchlists.append(new_watchlist_data)
+    save_watchlists({'watchlists': existing_watchlists})
+    
+    return WatchlistItem(**new_watchlist_data)
+
+@app.post("/watchlists/{watchlist_id}/symbols", response_model=WatchlistItem)
+async def add_symbol_to_watchlist(watchlist_id: str, symbol_data: WatchlistSymbol):
+    """Add a symbol to a specific watchlist"""
+    watchlists_data = load_watchlists()
+    watchlists = watchlists_data.get('watchlists', [])
+    
+    # Find the watchlist
+    target_watchlist = None
+    for wl in watchlists:
+        if wl.get('id') == watchlist_id:
+            target_watchlist = wl
+            break
+    
+    if not target_watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    
+    symbol = symbol_data.symbol.upper().strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol cannot be empty")
+    
+    # Ensure symbols list exists
+    if 'symbols' not in target_watchlist:
+        target_watchlist['symbols'] = []
+    
+    if symbol not in target_watchlist['symbols']:
+        target_watchlist['symbols'].append(symbol)
+        target_watchlist['updated_at'] = datetime.now().isoformat()
+        save_watchlists({'watchlists': watchlists})
+    
+    return WatchlistItem(**target_watchlist)
+
+@app.delete("/watchlists/{watchlist_id}/symbols/{symbol}", response_model=WatchlistItem)
+async def remove_symbol_from_watchlist(watchlist_id: str, symbol: str):
+    """Remove a symbol from a specific watchlist"""
+    watchlists_data = load_watchlists()
+    watchlists = watchlists_data.get('watchlists', [])
+    
+    # Find the watchlist
+    target_watchlist = None
+    for wl in watchlists:
+        if wl.get('id') == watchlist_id:
+            target_watchlist = wl
+            break
+    
+    if not target_watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    
+    symbol = symbol.upper().strip()
+    
+    if symbol in target_watchlist.get('symbols', []):
+        target_watchlist['symbols'].remove(symbol)
+        target_watchlist['updated_at'] = datetime.now().isoformat()
+        save_watchlists({'watchlists': watchlists})
+    
+    return WatchlistItem(**target_watchlist)
+
+@app.delete("/watchlists/{watchlist_id}")
+async def delete_watchlist(watchlist_id: str):
+    """Delete a watchlist"""
+    watchlists_data = load_watchlists()
+    watchlists = watchlists_data.get('watchlists', [])
+    
+    # Find and remove the watchlist
+    updated_watchlists = [wl for wl in watchlists if wl.get('id') != watchlist_id]
+    
+    if len(updated_watchlists) == len(watchlists):
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    
+    save_watchlists({'watchlists': updated_watchlists})
+    
+    return {"message": "Watchlist deleted successfully"}
+
+@app.post("/watchlists/{watchlist_id}/update-prices")
+async def update_watchlist_prices(watchlist_id: str):
+    """Update stock prices for all symbols in a watchlist"""
+    watchlists_data = load_watchlists()
+    watchlists = watchlists_data.get('watchlists', [])
+    
+    # Find the watchlist
+    target_watchlist = None
+    for wl in watchlists:
+        if wl.get('id') == watchlist_id:
+            target_watchlist = wl
+            break
+    
+    if not target_watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    
+    symbols = target_watchlist.get('symbols', [])
+    updated_prices = {}
+    
+    for symbol in symbols:
+        try:
+            # Get current ticker data
+            response = await get_ticker_data(symbol, "1d")
+            updated_prices[symbol] = {
+                'symbol': response['symbol'],
+                'current_price': response['current_price'],
+                'daily_change': response['daily_change'],
+                'daily_change_percent': response['daily_change_percent'],
+                'name': response.get('name', symbol)
+            }
+        except Exception as e:
+            print(f"Error updating price for {symbol}: {e}")
+            updated_prices[symbol] = None
+    
+    return {
+        'watchlist_id': watchlist_id,
+        'updated_prices': updated_prices,
+        'timestamp': datetime.now().isoformat()
+    }
+
+# Legacy single watchlist endpoints (for backward compatibility)
+@app.get("/watchlist", response_model=WatchlistResponse)
+async def get_watchlist():
+    """Get the current watchlist"""
+    symbols = load_watchlist()
+    return WatchlistResponse(symbols=symbols)
+
+@app.post("/watchlist", response_model=WatchlistResponse)
+async def add_to_watchlist(symbol_data: WatchlistSymbol):
+    """Add a symbol to the watchlist"""
+    symbols = load_watchlist()
+    symbol = symbol_data.symbol.upper().strip()
+    
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol cannot be empty")
+    
+    if symbol not in symbols:
+        symbols.append(symbol)
+        save_watchlist(symbols)
+    
+    return WatchlistResponse(symbols=symbols)
+
+@app.delete("/watchlist/{symbol}", response_model=WatchlistResponse)
+async def remove_from_watchlist(symbol: str):
+    """Remove a symbol from the watchlist"""
+    symbols = load_watchlist()
+    symbol = symbol.upper().strip()
+    
+    if symbol in symbols:
+        symbols.remove(symbol)
+        save_watchlist(symbols)
+    
+    return WatchlistResponse(symbols=symbols)
 
 if __name__ == "__main__":
     import uvicorn

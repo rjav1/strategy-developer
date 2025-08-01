@@ -1,16 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Plus, Trash2, Edit, Eye, Search, X, Save, Bookmark, TrendingUp, TrendingDown, Target, Play } from 'lucide-react'
-
-interface Watchlist {
-  id: string
-  name: string
-  description: string
-  symbols: string[]
-  createdAt: string
-  updatedAt: string
-}
+import { Plus, Trash2, Eye, TrendingUp, TrendingDown, MoreVertical, X, Bookmark, RefreshCw, AlertCircle } from 'lucide-react'
+import { useWatchlist } from '../providers/WatchlistProvider'
 
 interface StockData {
   symbol: string
@@ -20,508 +12,480 @@ interface StockData {
   daily_change_percent: number
 }
 
-export default function Watchlists() {
-  const [watchlists, setWatchlists] = useState<Watchlist[]>([])
-  const [selectedWatchlist, setSelectedWatchlist] = useState<Watchlist | null>(null)
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const [showAddSymbolModal, setShowAddSymbolModal] = useState(false)
-  const [newWatchlistName, setNewWatchlistName] = useState('')
-  const [newWatchlistDescription, setNewWatchlistDescription] = useState('')
-  const [newSymbol, setNewSymbol] = useState('')
-  const [editingWatchlist, setEditingWatchlist] = useState<Watchlist | null>(null)
+interface WatchlistDetailProps {
+  watchlistId: string
+  onClose: () => void
+}
+
+const WatchlistDetail: React.FC<WatchlistDetailProps> = ({ watchlistId, onClose }) => {
+  const { watchlists, removeFromWatchlist, addToWatchlist } = useWatchlist()
   const [stockData, setStockData] = useState<Record<string, StockData>>({})
   const [loading, setLoading] = useState(false)
+  const [newSymbol, setNewSymbol] = useState('')
+  const [addingSymbol, setAddingSymbol] = useState(false)
 
-  // Load watchlists from localStorage on component mount
+  const watchlist = watchlists.find(wl => wl.id === watchlistId)
+
   useEffect(() => {
-    const savedWatchlists = localStorage.getItem('watchlists')
-    if (savedWatchlists) {
-      setWatchlists(JSON.parse(savedWatchlists))
+    if (watchlist && watchlist.symbols.length > 0) {
+      fetchStockData()
     }
-  }, [])
+  }, [watchlist])
 
-  // Save watchlists to localStorage whenever they change
-  useEffect(() => {
-    localStorage.setItem('watchlists', JSON.stringify(watchlists))
-  }, [watchlists])
+  const fetchStockData = async () => {
+    if (!watchlist || watchlist.symbols.length === 0) return
 
-  // Fetch stock data for symbols in selected watchlist
-  useEffect(() => {
-    if (selectedWatchlist) {
-      fetchStockDataForWatchlist(selectedWatchlist.symbols)
-    }
-  }, [selectedWatchlist])
-
-  const fetchStockDataForWatchlist = async (symbols: string[]) => {
     setLoading(true)
     const newStockData: Record<string, StockData> = {}
-    
-    for (const symbol of symbols) {
-      try {
-        const response = await fetch(`http://localhost:8000/ticker/${symbol.toUpperCase()}?range=1d`)
-        if (response.ok) {
-          const data = await response.json()
+
+    try {
+      const promises = watchlist.symbols.map(async (symbol) => {
+        try {
+          const response = await fetch(`http://localhost:8000/ticker/${symbol}?range=1d`)
+          if (response.ok) {
+            const data = await response.json()
+            newStockData[symbol] = {
+              symbol: data.symbol,
+              name: data.name || symbol,
+              current_price: data.current_price || 0,
+              daily_change: data.daily_change || 0,
+              daily_change_percent: data.daily_change_percent || 0,
+            }
+          }
+        } catch (error) {
+          console.error(`Error fetching data for ${symbol}:`, error)
           newStockData[symbol] = {
-            symbol: data.symbol,
-            name: data.name,
-            current_price: data.current_price,
-            daily_change: data.daily_change,
-            daily_change_percent: data.daily_change_percent
+            symbol,
+            name: symbol,
+            current_price: 0,
+            daily_change: 0,
+            daily_change_percent: 0,
           }
         }
-      } catch (error) {
-        console.error(`Failed to fetch data for ${symbol}:`, error)
-      }
+      })
+
+      await Promise.all(promises)
+      setStockData(newStockData)
+    } catch (error) {
+      console.error('Error fetching stock data:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleRemoveSymbol = async (symbol: string) => {
+    await removeFromWatchlist(symbol, watchlistId)
+  }
+
+  const handleAddSymbol = async () => {
+    if (!newSymbol.trim()) return
+    
+    const symbol = newSymbol.trim().toUpperCase()
+    
+    // Check if symbol already exists in watchlist
+    if (watchlist?.symbols.includes(symbol)) {
+      alert('Symbol already exists in this watchlist')
+      return
     }
     
-    setStockData(newStockData)
-    setLoading(false)
-  }
-
-  const createWatchlist = () => {
-    if (!newWatchlistName.trim()) return
-
-    const newWatchlist: Watchlist = {
-      id: Date.now().toString(),
-      name: newWatchlistName.trim(),
-      description: newWatchlistDescription.trim(),
-      symbols: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    setWatchlists([...watchlists, newWatchlist])
-    setNewWatchlistName('')
-    setNewWatchlistDescription('')
-    setShowCreateModal(false)
-    setSelectedWatchlist(newWatchlist)
-  }
-
-  const deleteWatchlist = (id: string) => {
-    setWatchlists(watchlists.filter(w => w.id !== id))
-    if (selectedWatchlist?.id === id) {
-      setSelectedWatchlist(null)
+    setAddingSymbol(true)
+    try {
+      await addToWatchlist(symbol, watchlistId)
+      setNewSymbol('')
+      // Refresh stock data to include the new symbol
+      setTimeout(() => {
+        fetchStockData()
+      }, 500)
+    } catch (error) {
+      console.error('Error adding symbol:', error)
+      alert('Failed to add symbol')
+    } finally {
+      setAddingSymbol(false)
     }
   }
 
-  const addSymbolToWatchlist = (watchlistId: string, symbol: string) => {
-    if (!symbol.trim()) return
-
-    const symbolUpper = symbol.trim().toUpperCase()
-    setWatchlists(watchlists.map(w => {
-      if (w.id === watchlistId) {
-        const updatedSymbols = w.symbols.includes(symbolUpper) 
-          ? w.symbols 
-          : [...w.symbols, symbolUpper]
-        return {
-          ...w,
-          symbols: updatedSymbols,
-          updatedAt: new Date().toISOString()
-        }
-      }
-      return w
-    }))
-
-    setNewSymbol('')
-    setShowAddSymbolModal(false)
-  }
-
-  const removeSymbolFromWatchlist = (watchlistId: string, symbol: string) => {
-    setWatchlists(watchlists.map(w => {
-      if (w.id === watchlistId) {
-        return {
-          ...w,
-          symbols: w.symbols.filter(s => s !== symbol),
-          updatedAt: new Date().toISOString()
-        }
-      }
-      return w
-    }))
-  }
-
-  const updateWatchlist = (watchlist: Watchlist) => {
-    setWatchlists(watchlists.map(w => {
-      if (w.id === watchlist.id) {
-        return {
-          ...watchlist,
-          updatedAt: new Date().toISOString()
-        }
-      }
-      return w
-    }))
-    setEditingWatchlist(null)
-  }
-
-  const addSymbolsFromScreener = (symbols: string[]) => {
-    if (!selectedWatchlist) return
-
-    const uniqueSymbols = Array.from(new Set([...selectedWatchlist.symbols, ...symbols]))
-    setWatchlists(watchlists.map(w => {
-      if (w.id === selectedWatchlist.id) {
-        return {
-          ...w,
-          symbols: uniqueSymbols,
-          updatedAt: new Date().toISOString()
-        }
-      }
-      return w
-    }))
-  }
+  if (!watchlist) return null
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Watchlists</h1>
-          <p className="text-muted-foreground">Manage your stock watchlists for backtesting</p>
-        </div>
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition-colors"
-        >
-          <Plus className="h-4 w-4" />
-          New Watchlist
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Watchlist List */}
-        <div className="lg:col-span-1">
-          <div className="card-glow p-6">
-            <h3 className="text-lg font-semibold text-white mb-4">Your Watchlists</h3>
-            
-            {watchlists.length === 0 ? (
-              <div className="text-center py-8">
-                <Bookmark className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                <p className="text-muted-foreground mb-4">No watchlists yet</p>
-                <button
-                  onClick={() => setShowCreateModal(true)}
-                  className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition-colors"
-                >
-                  Create First Watchlist
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {watchlists.map((watchlist) => (
-                  <div
-                    key={watchlist.id}
-                    className={`p-3 rounded-lg cursor-pointer transition-all duration-200 ${
-                      selectedWatchlist?.id === watchlist.id
-                        ? 'bg-purple-500 text-white'
-                        : 'bg-card/50 hover:bg-card/70 text-muted-foreground hover:text-white'
-                    }`}
-                    onClick={() => setSelectedWatchlist(watchlist)}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1">
-                        <h4 className="font-medium">{watchlist.name}</h4>
-                        <p className="text-sm opacity-75">
-                          {watchlist.symbols.length} symbols
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setEditingWatchlist(watchlist)
-                          }}
-                          className="p-1 hover:bg-white/10 rounded transition-colors"
-                        >
-                          <Edit className="h-3 w-3" />
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            deleteWatchlist(watchlist.id)
-                          }}
-                          className="p-1 hover:bg-red-500/20 rounded transition-colors"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[9000] p-4">
+      <div className="bg-gray-900 rounded-xl max-w-4xl w-full max-h-[90vh] overflow-hidden shadow-2xl">
+        {/* Header */}
+        <div className="flex items-center justify-between p-6 border-b border-gray-700">
+          <div>
+            <h2 className="text-2xl font-bold text-white">{watchlist.name}</h2>
+            <p className="text-gray-400 text-sm mt-1">
+              {watchlist.symbols.length} symbol{watchlist.symbols.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={fetchStockData}
+              disabled={loading}
+              className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+              title="Refresh prices"
+            >
+              <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={onClose}
+              className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
           </div>
         </div>
 
-        {/* Watchlist Details */}
-        <div className="lg:col-span-2">
-          {selectedWatchlist ? (
-            <div className="card-glow p-6">
-              <div className="flex items-center justify-between mb-6">
-                <div>
-                  <h2 className="text-2xl font-bold text-white">{selectedWatchlist.name}</h2>
-                  {selectedWatchlist.description && (
-                    <p className="text-muted-foreground mt-1">{selectedWatchlist.description}</p>
-                  )}
-                  <p className="text-sm text-muted-foreground mt-2">
-                    Created {new Date(selectedWatchlist.createdAt).toLocaleDateString()} • 
-                    Updated {new Date(selectedWatchlist.updatedAt).toLocaleDateString()}
-                  </p>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setShowAddSymbolModal(true)}
-                    className="flex items-center gap-2 px-3 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors"
-                  >
-                    <Plus className="h-4 w-4" />
-                    Add Symbol
-                  </button>
-                  <button
-                    onClick={() => {
-                      // Navigate to backtest with this watchlist selected
-                      window.location.href = `/backtest?watchlist=${selectedWatchlist.id}`
-                    }}
-                    className="flex items-center gap-2 px-3 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg transition-colors"
-                  >
-                    <Play className="h-4 w-4" />
-                    Backtest
-                  </button>
-                </div>
-              </div>
+        {/* Content */}
+        <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+          {/* Add Symbol Section */}
+          <div className="mb-6 p-4 bg-gray-800 rounded-lg">
+            <h3 className="text-sm font-medium text-gray-300 mb-3">Add New Symbol</h3>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={newSymbol}
+                onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
+                onKeyPress={(e) => e.key === 'Enter' && handleAddSymbol()}
+                placeholder="Enter stock symbol (e.g., AAPL)"
+                className="flex-1 px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-blue-500 focus:outline-none text-sm font-mono"
+                disabled={addingSymbol}
+              />
+              <button
+                onClick={handleAddSymbol}
+                disabled={addingSymbol || !newSymbol.trim()}
+                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 transition-colors text-sm"
+              >
+                {addingSymbol ? 'Adding...' : 'Add'}
+              </button>
+            </div>
+          </div>
 
-              {selectedWatchlist.symbols.length === 0 ? (
-                <div className="text-center py-12">
-                  <Target className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                  <p className="text-muted-foreground mb-4">No symbols in this watchlist</p>
-                  <button
-                    onClick={() => setShowAddSymbolModal(true)}
-                    className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
-                  >
-                    Add Your First Symbol
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold text-white">
-                      Symbols ({selectedWatchlist.symbols.length})
-                    </h3>
-                    {loading && (
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
-                        Loading data...
-                      </div>
-                    )}
-                  </div>
-                  
-                  <div className="grid gap-3">
-                    {selectedWatchlist.symbols.map((symbol) => {
-                      const stock = stockData[symbol]
-                      return (
-                        <div
-                          key={symbol}
-                          className="flex items-center justify-between p-3 bg-card/30 rounded-lg"
-                        >
-                          <div className="flex items-center gap-3">
-                            <div>
-                              <h4 className="font-medium text-white">{symbol}</h4>
-                              {stock && (
-                                <p className="text-sm text-muted-foreground">{stock.name}</p>
-                              )}
-                            </div>
-                          </div>
-                          
-                          <div className="flex items-center gap-4">
-                            {stock ? (
-                              <>
-                                <div className="text-right">
-                                  <div className="font-medium text-white">
-                                    ${stock.current_price.toFixed(2)}
-                                  </div>
-                                  <div className={`flex items-center gap-1 text-sm ${
-                                    stock.daily_change >= 0 ? 'text-green-400' : 'text-red-400'
-                                  }`}>
-                                    {stock.daily_change >= 0 ? (
-                                      <TrendingUp className="h-3 w-3" />
-                                    ) : (
-                                      <TrendingDown className="h-3 w-3" />
-                                    )}
-                                    {stock.daily_change >= 0 ? '+' : ''}{stock.daily_change.toFixed(2)} ({stock.daily_change_percent.toFixed(2)}%)
-                                  </div>
-                                </div>
-                              </>
-                            ) : (
-                              <div className="text-sm text-muted-foreground">No data</div>
-                            )}
-                            
-                            <button
-                              onClick={() => removeSymbolFromWatchlist(selectedWatchlist.id, symbol)}
-                              className="p-1 hover:bg-red-500/20 rounded transition-colors"
-                            >
-                              <X className="h-4 w-4 text-red-400" />
-                            </button>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
+          {watchlist.symbols.length === 0 ? (
+            <div className="text-center py-12">
+              <Bookmark className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+              <h3 className="text-xl font-semibold text-gray-400 mb-2">No symbols yet</h3>
+              <p className="text-gray-500">Add symbols from the screener or manually</p>
             </div>
           ) : (
-            <div className="card-glow p-6">
-              <div className="text-center py-12">
-                <Bookmark className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                <h3 className="text-lg font-semibold text-white mb-2">Select a Watchlist</h3>
-                <p className="text-muted-foreground">
-                  Choose a watchlist from the left to view its details and manage symbols
-                </p>
-              </div>
+            <div className="grid gap-4">
+              {watchlist.symbols.map((symbol) => {
+                const stock = stockData[symbol]
+                const isPositive = stock?.daily_change_percent >= 0
+
+                return (
+                  <div
+                    key={symbol}
+                    className="flex items-center justify-between p-4 bg-gray-800 rounded-lg hover:bg-gray-750 transition-colors"
+                  >
+                    <div className="flex-1">
+                      <div className="flex items-center gap-4">
+                        <div>
+                          <h4 className="font-mono font-semibold text-blue-400 text-lg">
+                            {symbol}
+                          </h4>
+                          <p className="text-gray-400 text-sm">
+                            {loading ? (
+                              <div className="w-32 h-4 bg-gray-700 rounded animate-pulse"></div>
+                            ) : (
+                              stock?.name || symbol
+                            )}
+                          </p>
+                        </div>
+                        
+                        <div className="flex items-center gap-6 ml-auto">
+                          <div className="text-right">
+                            <div className="font-semibold text-white text-lg">
+                              {loading ? (
+                                <div className="w-20 h-5 bg-gray-700 rounded animate-pulse"></div>
+                              ) : (
+                                `$${stock?.current_price?.toFixed(2) || '0.00'}`
+                              )}
+                            </div>
+                            {loading ? (
+                              <div className="w-16 h-4 bg-gray-700 rounded animate-pulse mt-1"></div>
+                            ) : stock ? (
+                              <div className={`flex items-center gap-1 text-sm ${
+                                isPositive ? 'text-green-400' : 'text-red-400'
+                              }`}>
+                                {isPositive ? (
+                                  <TrendingUp className="w-4 h-4" />
+                                ) : (
+                                  <TrendingDown className="w-4 h-4" />
+                                )}
+                                <span>
+                                  {isPositive ? '+' : ''}
+                                  {stock.daily_change?.toFixed(2)} ({isPositive ? '+' : ''}
+                                  {stock.daily_change_percent?.toFixed(2)}%)
+                                </span>
+                              </div>
+                            ) : null}
+                          </div>
+                          
+                          <button
+                            onClick={() => handleRemoveSymbol(symbol)}
+                            className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-lg transition-colors"
+                            title="Remove from watchlist"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
       </div>
-
-      {/* Create Watchlist Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
-            <h3 className="text-lg font-semibold text-white mb-4">Create New Watchlist</h3>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Name
-                </label>
-                <input
-                  type="text"
-                  value={newWatchlistName}
-                  onChange={(e) => setNewWatchlistName(e.target.value)}
-                  placeholder="Enter watchlist name"
-                  className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Description (Optional)
-                </label>
-                <textarea
-                  value={newWatchlistDescription}
-                  onChange={(e) => setNewWatchlistDescription(e.target.value)}
-                  placeholder="Enter description"
-                  rows={3}
-                  className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
-                />
-              </div>
-            </div>
-            
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={createWatchlist}
-                disabled={!newWatchlistName.trim()}
-                className="flex-1 px-4 py-2 bg-purple-500 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors"
-              >
-                Create
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add Symbol Modal */}
-      {showAddSymbolModal && selectedWatchlist && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
-            <h3 className="text-lg font-semibold text-white mb-4">
-              Add Symbol to {selectedWatchlist.name}
-            </h3>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Symbol
-                </label>
-                <input
-                  type="text"
-                  value={newSymbol}
-                  onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
-                  placeholder="Enter ticker symbol (e.g., AAPL)"
-                  className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
-                />
-              </div>
-            </div>
-            
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowAddSymbolModal(false)}
-                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => addSymbolToWatchlist(selectedWatchlist.id, newSymbol)}
-                disabled={!newSymbol.trim()}
-                className="flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors"
-              >
-                Add
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Watchlist Modal */}
-      {editingWatchlist && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 max-w-md w-full">
-            <h3 className="text-lg font-semibold text-white mb-4">Edit Watchlist</h3>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Name
-                </label>
-                <input
-                  type="text"
-                  value={editingWatchlist.name}
-                  onChange={(e) => setEditingWatchlist({...editingWatchlist, name: e.target.value})}
-                  className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Description
-                </label>
-                <textarea
-                  value={editingWatchlist.description}
-                  onChange={(e) => setEditingWatchlist({...editingWatchlist, description: e.target.value})}
-                  rows={3}
-                  className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
-                />
-              </div>
-            </div>
-            
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setEditingWatchlist(null)}
-                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => updateWatchlist(editingWatchlist)}
-                disabled={!editingWatchlist.name.trim()}
-                className="flex-1 px-4 py-2 bg-purple-500 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors"
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
-} 
+}
+
+export default function Watchlists() {
+  const { 
+    watchlists, 
+    isLoading, 
+    error, 
+    createWatchlist, 
+    deleteWatchlist,
+    refreshWatchlists 
+  } = useWatchlist()
+
+  const [selectedWatchlistId, setSelectedWatchlistId] = useState<string | null>(null)
+  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [newWatchlistName, setNewWatchlistName] = useState('')
+  const [newWatchlistDescription, setNewWatchlistDescription] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState('')
+
+  const handleCreateWatchlist = async () => {
+    if (!newWatchlistName.trim()) return
+
+    setCreating(true)
+    setCreateError('')
+
+    try {
+      const newWatchlist = await createWatchlist(newWatchlistName.trim(), newWatchlistDescription.trim())
+      if (newWatchlist) {
+        setNewWatchlistName('')
+        setNewWatchlistDescription('')
+        setShowCreateModal(false)
+      } else {
+        setCreateError('Failed to create watchlist')
+      }
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : 'Failed to create watchlist')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const handleDeleteWatchlist = async (id: string) => {
+    if (confirm('Are you sure you want to delete this watchlist?')) {
+      await deleteWatchlist(id)
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-black text-white p-8">
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
+        <div className="flex justify-between items-center mb-8">
+          <div>
+            <h1 className="text-3xl font-bold mb-2">Watchlists</h1>
+            <p className="text-gray-400">
+              Create and manage your stock watchlists
+            </p>
+          </div>
+          <button
+            onClick={refreshWatchlists}
+            disabled={isLoading}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors"
+          >
+            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
+
+        {/* Error Display */}
+        {error && (
+          <div className="bg-red-900 border border-red-700 rounded-lg p-4 mb-6">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-red-400" />
+              <span className="text-red-400 font-medium">Error</span>
+            </div>
+            <p className="text-red-300 mt-2">{error}</p>
+          </div>
+        )}
+
+        {/* Watchlists Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {/* Create New Watchlist Card */}
+          <div
+            onClick={() => setShowCreateModal(true)}
+            className="group relative p-6 bg-gradient-to-br from-blue-900/20 to-purple-900/20 border-2 border-dashed border-blue-500/30 rounded-xl hover:border-blue-500/50 transition-all cursor-pointer hover:scale-105"
+          >
+            <div className="text-center">
+              <div className="w-16 h-16 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:bg-blue-500/30 transition-colors">
+                <Plus className="w-8 h-8 text-blue-400" />
+              </div>
+              <h3 className="text-lg font-semibold text-blue-400 mb-2">Create New Watchlist</h3>
+              <p className="text-gray-500 text-sm">Start tracking your favorite stocks</p>
+            </div>
+          </div>
+
+          {/* Existing Watchlists */}
+          {watchlists.map((watchlist) => (
+            <div
+              key={watchlist.id}
+              className="group relative p-6 bg-gray-900 rounded-xl border border-gray-700 hover:border-gray-600 transition-all hover:scale-105 hover:shadow-xl"
+            >
+              <div className="flex items-start justify-between mb-4">
+                <div className="flex-1">
+                  <h3 className="text-xl font-semibold text-white mb-2 group-hover:text-blue-400 transition-colors">
+                    {watchlist.name}
+                  </h3>
+                  <p className="text-gray-400 text-sm">
+                    {watchlist.description || 'No description'}
+                  </p>
+                </div>
+                <div className="relative">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      handleDeleteWatchlist(watchlist.id)
+                    }}
+                    className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
+                    title="Delete watchlist"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Preview of symbols */}
+              <div className="mb-4">
+                {watchlist.symbols.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {watchlist.symbols.slice(0, 3).map((symbol) => (
+                      <span
+                        key={symbol}
+                        className="px-2 py-1 bg-gray-800 text-gray-300 text-xs font-mono rounded"
+                      >
+                        {symbol}
+                      </span>
+                    ))}
+                    {watchlist.symbols.length > 3 && (
+                      <span className="px-2 py-1 bg-gray-700 text-gray-400 text-xs rounded">
+                        +{watchlist.symbols.length - 3} more
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-gray-500 text-sm italic">No symbols yet</p>
+                )}
+              </div>
+
+              {/* View Button */}
+              <button
+                onClick={() => setSelectedWatchlistId(watchlist.id)}
+                className="w-full flex items-center justify-center gap-2 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white rounded-lg transition-colors"
+              >
+                <Eye className="w-4 h-4" />
+                View Details
+              </button>
+
+              {/* Updated timestamp */}
+              <p className="text-xs text-gray-500 mt-3 text-center">
+                Updated {new Date(watchlist.updated_at).toLocaleDateString()}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        {/* Empty State */}
+        {!isLoading && watchlists.length === 0 && (
+          <div className="text-center py-12">
+            <Bookmark className="w-20 h-20 text-gray-600 mx-auto mb-6" />
+            <h3 className="text-2xl font-semibold text-gray-400 mb-4">No watchlists yet</h3>
+            <p className="text-gray-500">Add stocks to watchlists from the screener or use the "+" card above to create your first watchlist</p>
+          </div>
+        )}
+
+        {/* Create Watchlist Modal */}
+        {showCreateModal && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[9000] p-4">
+            <div className="bg-gray-900 rounded-xl max-w-md w-full p-6 shadow-2xl">
+              <h2 className="text-xl font-bold text-white mb-4">Create New Watchlist</h2>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    Watchlist Name
+                  </label>
+                  <input
+                    type="text"
+                    value={newWatchlistName}
+                    onChange={(e) => setNewWatchlistName(e.target.value)}
+                    placeholder="Enter watchlist name"
+                    className="w-full p-3 bg-gray-800 text-white rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                    disabled={creating}
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    Description (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={newWatchlistDescription}
+                    onChange={(e) => setNewWatchlistDescription(e.target.value)}
+                    placeholder="Enter description"
+                    className="w-full p-3 bg-gray-800 text-white rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                    disabled={creating}
+                  />
+                </div>
+                
+                {createError && (
+                  <p className="text-red-400 text-sm">{createError}</p>
+                )}
+              </div>
+
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={() => {
+                    setShowCreateModal(false)
+                    setNewWatchlistName('')
+                    setNewWatchlistDescription('')
+                    setCreateError('')
+                  }}
+                  className="flex-1 py-2 bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 transition-colors"
+                  disabled={creating}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCreateWatchlist}
+                  disabled={creating || !newWatchlistName.trim()}
+                  className="flex-1 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  {creating ? 'Creating...' : 'Create'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Watchlist Detail Modal */}
+        {selectedWatchlistId && (
+          <WatchlistDetail
+            watchlistId={selectedWatchlistId}
+            onClose={() => setSelectedWatchlistId(null)}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
