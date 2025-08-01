@@ -155,7 +155,7 @@ export default function Watchlists() {
   const addSymbolsFromScreener = (symbols: string[]) => {
     if (!selectedWatchlist) return
 
-    const uniqueSymbols = [...new Set([...selectedWatchlist.symbols, ...symbols])]
+    const uniqueSymbols = Array.from(new Set([...selectedWatchlist.symbols, ...symbols]))
     setWatchlists(watchlists.map(w => {
       if (w.id === selectedWatchlist.id) {
         return {

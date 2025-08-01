@@ -178,15 +178,10 @@ export default function Analytics() {
 
   const getCriteriaName = (key: string) => {
     const names = {
-      criterion1_large_move: 'Large Pre-Consolidation Move (30%+)',
-      criterion2_consolidation: 'Extended Consolidation (3-20+ days)',
-      criterion3_narrow_range: 'Narrow Range Days',
-      criterion4_moving_averages: 'Above/Surfing Moving Averages',
-      criterion5_volume_breakout: 'Increased Volume on Breakout',
-      criterion6_close_at_hod: 'Close at/Near High of Day',
-      criterion7_not_extended: 'Not Extended from MAs',
-      criterion8_linear_moves: 'Linear & Orderly Moves',
-      criterion9_avoid_barcode: 'Avoid Volatile/Barcode Moves'
+      criterion1: 'Large Momentum Move (LOW to HIGH ≥3x ADR)',
+      criterion2_3: 'Multi-Phase Consolidation Analysis',
+      criterion4: 'Current Price Above 50-Day Moving Average',
+      criterion5: 'Optimal Volatility Range (3-20% ADR)'
     }
     return names[key as keyof typeof names] || key
   }
@@ -347,8 +342,8 @@ export default function Analytics() {
                   <h3 className="font-medium text-white mb-2">Quick Insights</h3>
                   <p className="text-sm text-muted-foreground leading-relaxed">
                     {analysisResult.pattern_found 
-                      ? `${analysisResult.symbol} shows a ${analysisResult.pattern_strength.toLowerCase()} momentum pattern with ${analysisResult.confidence_score.toFixed(1)}% confidence. ${analysisResult.total_criteria_met} out of 9 technical criteria are satisfied, suggesting ${analysisResult.pattern_strength === 'Strong' ? 'excellent' : analysisResult.pattern_strength === 'Moderate' ? 'good' : 'limited'} momentum potential.`
-                      : `${analysisResult.symbol} does not currently meet the 5 Star Trading Setup criteria. Only ${analysisResult.total_criteria_met} out of 9 criteria are satisfied. Consider waiting for better setup conditions or analyzing different time periods.`
+                      ? `${analysisResult.symbol} shows a ${analysisResult.pattern_strength.toLowerCase()} momentum pattern with ${analysisResult.confidence_score.toFixed(1)}% confidence. ${analysisResult.total_criteria_met} out of 4 technical criteria are satisfied, suggesting ${analysisResult.pattern_strength === 'Strong' ? 'excellent' : analysisResult.pattern_strength === 'Moderate' ? 'good' : 'limited'} momentum potential.`
+                      : `${analysisResult.symbol} does not currently meet the 5 Star Trading Setup criteria. Only ${analysisResult.total_criteria_met} out of 4 criteria are satisfied. Consider waiting for better setup conditions or analyzing different time periods.`
                     }
                   </p>
                 </div>

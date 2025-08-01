@@ -76,7 +76,7 @@ export default function Screeners() {
   const [showMomentumModal, setShowMomentumModal] = useState(false)
   const [analyzingSymbol, setAnalyzingSymbol] = useState('')
   const [customSymbols, setCustomSymbols] = useState('')
-  const [minCriteria, setMinCriteria] = useState(6)
+  const [minCriteria, setMinCriteria] = useState(3)
   const [topN, setTopN] = useState(20)
   const [period, setPeriod] = useState('6mo')
   
@@ -91,7 +91,7 @@ export default function Screeners() {
   const [volatilityThreshold, setVolatilityThreshold] = useState(0.05)
   const [requireAllSma, setRequireAllSma] = useState(true)
   const [requireBothMaTrending, setRequireBothMaTrending] = useState(true)
-  const [enabledCriteria, setEnabledCriteria] = useState([1,2,3,4,5,6,7,8,9])
+  const [enabledCriteria, setEnabledCriteria] = useState([1,2,3,4])
   const [fallbackEnabled, setFallbackEnabled] = useState(true)
   const [showAdvancedControls, setShowAdvancedControls] = useState(false)
   
@@ -384,7 +384,7 @@ export default function Screeners() {
 
   const formatValue = (result: ScreenResult, type: 'momentum' | 'volatility') => {
     if (type === 'momentum') {
-      return `${result.total_met}/6 criteria met`
+      return `${result.total_met}/4 criteria met`
     } else {
       // For volatility, use the value property if it exists
       const value = (result as any).value || 0
@@ -412,9 +412,9 @@ export default function Screeners() {
     }
     
     if (type === 'momentum') {
-      return `Screened ${totalStocks} stocks using 5 Star Trading Setup criteria. Average criteria met: ${averageValue.toFixed(1)}/6. 
+      return `Screened ${totalStocks} stocks using 5 Star Trading Setup criteria. Average criteria met: ${averageValue.toFixed(1)}/4. 
       Pattern strength distribution: ${strongPatterns} Strong, ${moderatePatterns} Moderate, ${weakPatterns} Weak patterns found. 
-      Top performer: ${topPerformer.symbol} (${topPerformer.total_met}/6 criteria met, ${topPerformer.pattern_strength} pattern).`
+      Top performer: ${topPerformer.symbol} (${topPerformer.total_met}/4 criteria met, ${topPerformer.pattern_strength} pattern).`
     } else {
       return `Screened ${totalStocks} stocks for volatility. Average volatility: ${(averageValue * 100).toFixed(2)}%. 
       Lowest volatility: ${topPerformer.symbol} (${(topPerformer.value * 100).toFixed(2)}%), 
@@ -491,7 +491,7 @@ export default function Screeners() {
     const symbolsToAdd = Array.from(selectedStocks)
     const updatedWatchlist = {
       ...watchlist,
-      symbols: [...new Set([...watchlist.symbols, ...symbolsToAdd])],
+      symbols: Array.from(new Set([...watchlist.symbols, ...symbolsToAdd])),
       updatedAt: new Date().toISOString()
     }
 
@@ -574,12 +574,12 @@ export default function Screeners() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">Min Criteria (out of 9)</label>
+            <label className="block text-sm font-medium text-muted-foreground mb-2">Min Criteria (out of 4)</label>
             <input 
               type="number" 
               value={minCriteria} 
-              onChange={(e) => setMinCriteria(parseInt(e.target.value) || 6)}
-              min="1" max="9" 
+              onChange={(e) => setMinCriteria(parseInt(e.target.value) || 3)}
+              min="1" max="4" 
               className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
             />
           </div>
@@ -603,17 +603,12 @@ export default function Screeners() {
             {/* Criteria Selection */}
             <div className="mb-6">
               <label className="block text-sm font-medium text-muted-foreground mb-3">Enabled Criteria</label>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 {[
-                  { id: 1, name: "Large Move (30%+)" },
-                  { id: 2, name: "Consolidation (New 4-Criteria)" },
-                  { id: 3, name: "Narrow Range" },
-                  { id: 4, name: "Above MAs" },
-                  { id: 5, name: "Volume Spike" },
-                  { id: 6, name: "Close at HOD" },
-                  { id: 7, name: "Not Extended" },
-                  { id: 8, name: "Linear Moves" },
-                  { id: 9, name: "Avoid Barcode" }
+                  { id: 1, name: "Large Momentum Move (LOW to HIGH ≥3x ADR)" },
+                  { id: 2, name: "Multi-Phase Consolidation Analysis" },
+                  { id: 3, name: "Current Price Above 50-Day Moving Average" },
+                  { id: 4, name: "Optimal Volatility Range (3-20% ADR)" }
                 ].map((criterion) => (
                   <label key={criterion.id} className="flex items-center gap-2 text-sm text-gray-300">
                     <input
@@ -635,123 +630,72 @@ export default function Screeners() {
             </div>
 
             {/* Thresholds Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
               <div>
                 <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Min Move % <span className="text-xs">(Criterion 1)</span>
+                  ADR Multiplier for Momentum Move <span className="text-xs">(Criterion 1)</span>
                 </label>
                 <input 
                   type="number" 
-                  value={minPercentageMove} 
-                  onChange={(e) => setMinPercentageMove(parseFloat(e.target.value) || 30)}
-                  min="10" max="100" step="5"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
+                  value={3} 
+                  onChange={() => {}} // Fixed at 3x ADR
+                  min="2" max="5" step="0.5"
+                  disabled
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-400"
                 />
+                <div className="text-xs text-gray-500 mt-1">
+                  Fixed at 3x ADR (LOW to HIGH calculation)
+                </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Consolidation Criteria <span className="text-xs">(Criterion 2)</span>
+                  Consolidation Analysis <span className="text-xs">(Criterion 2)</span>
                 </label>
                 <div className="text-xs text-muted-foreground mb-2">
-                  • ≥3 candles • Lower volume • Lower ADR • Price stability
+                  • ≥3 candles • Lower volume vs move period
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  • Lower ADR vs move • Price stability ≤1.5% ADR
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  (Automated multi-phase detection)
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-muted-foreground mb-2">
+                  50 SMA Requirement <span className="text-xs">(Criterion 3)</span>
+                </label>
+                <div className="text-xs text-muted-foreground mb-2">
+                  Current close price must be above 50-day SMA
                 </div>
                 <div className="text-xs text-gray-500">
-                  (New 4-criteria consolidation detection)
+                  (Automated trend confirmation check)
                 </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Narrow Range Multiplier <span className="text-xs">(Criterion 3)</span>
+                  ADR Range Limits <span className="text-xs">(Criterion 4)</span>
                 </label>
-                <input 
-                  type="number" 
-                  value={narrowRangeMultiplier} 
-                  onChange={(e) => setNarrowRangeMultiplier(parseFloat(e.target.value) || 0.7)}
-                  min="0.3" max="1.5" step="0.1"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Volume Spike Threshold <span className="text-xs">(Criterion 5)</span>
-                </label>
-                <input 
-                  type="number" 
-                  value={volumeSpikeThreshold} 
-                  onChange={(e) => setVolumeSpikeThreshold(parseFloat(e.target.value) || 1.5)}
-                  min="1.0" max="5.0" step="0.1"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  HOD Distance % <span className="text-xs">(Criterion 6)</span>
-                </label>
-                <input 
-                  type="number" 
-                  value={hodDistanceThreshold * 100} 
-                  onChange={(e) => setHodDistanceThreshold((parseFloat(e.target.value) || 5) / 100)}
-                  min="1" max="15" step="1"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  SMA Distance % <span className="text-xs">(Criterion 7)</span>
-                </label>
-                <input 
-                  type="number" 
-                  value={smaDistanceThreshold} 
-                  onChange={(e) => setSmaDistanceThreshold(parseFloat(e.target.value) || 15)}
-                  min="5" max="50" step="5"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Correlation Threshold <span className="text-xs">(Criterion 8)</span>
-                </label>
-                <input 
-                  type="number" 
-                  value={correlationThreshold} 
-                  onChange={(e) => setCorrelationThreshold(parseFloat(e.target.value) || 0.7)}
-                  min="0.3" max="1.0" step="0.1"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-2">
-                  Volatility Threshold <span className="text-xs">(Criterion 9)</span>
-                </label>
-                <input 
-                  type="number" 
-                  value={volatilityThreshold} 
-                  onChange={(e) => setVolatilityThreshold(parseFloat(e.target.value) || 0.05)}
-                  min="0.01" max="0.2" step="0.01"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
-                />
+                <div className="text-xs text-muted-foreground mb-2">
+                  Minimum: 3.0% ADR • Maximum: 20.0% ADR
+                </div>
+                <div className="text-xs text-gray-500">
+                  (Optimal volatility range for momentum patterns)
+                </div>
               </div>
             </div>
 
-            {/* Boolean Options */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Analysis Options */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <label className="flex items-center gap-3 text-sm text-gray-300">
                 <input
                   type="checkbox"
-                  checked={requireAllSma}
-                  onChange={(e) => setRequireAllSma(e.target.checked)}
-                  className="rounded bg-gray-800 border-gray-600 text-purple-500"
+                  checked={true}
+                  onChange={() => {}} // Always enabled for new system
+                  disabled
+                  className="rounded bg-gray-700 border-gray-600 text-purple-400"
                 />
-                Require Above ALL SMAs (10, 20, 50)
-              </label>
-              <label className="flex items-center gap-3 text-sm text-gray-300">
-                <input
-                  type="checkbox"
-                  checked={requireBothMaTrending}
-                  onChange={(e) => setRequireBothMaTrending(e.target.checked)}
-                  className="rounded bg-gray-800 border-gray-600 text-purple-500"
-                />
-                Require BOTH MAs Trending Up
+                <span className="text-gray-400">Use 50 SMA Trend Filter (Always On)</span>
               </label>
               <label className="flex items-center gap-3 text-sm text-gray-300">
                 <input
@@ -760,7 +704,7 @@ export default function Screeners() {
                   onChange={(e) => setFallbackEnabled(e.target.checked)}
                   className="rounded bg-gray-800 border-gray-600 text-purple-500"
                 />
-                Enable Fallback (Less Strict)
+                Enable Fallback Mode (3/4 instead of 4/4 criteria)
               </label>
             </div>
           </div>
@@ -1155,23 +1099,19 @@ export default function Screeners() {
                   {momentumAnalysis.criteria_met && (
                     <div className="card-glow p-6">
                       <h3 className="text-lg font-semibold text-white mb-4">5 Star Trading Setup Criteria Analysis</h3>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {Object.entries(momentumAnalysis.criteria_met).map(([key, met], index) => {
                           const criterionNames = {
-                            'large_move': 'Large Move (30%+)',
-                            'consolidation': 'Consolidation Pattern (New 4-Criteria)',
-                            'ma10_tolerance': 'MA10 Tolerance',
-                            'reconsolidation': 'Reconsolidation',
-                            'linear_moves': 'Linear Moves',
-                            'avoid_barcode': 'Avoid Barcode'
+                            'large_move': 'Large Momentum Move (LOW to HIGH ≥3x ADR)',
+                            'consolidation': 'Multi-Phase Consolidation Analysis',
+                            'above_50_sma': 'Current Price Above 50-Day Moving Average',
+                            'adr_range': 'Optimal Volatility Range (3-20% ADR)'
                           };
                           const descriptions = {
-                            'large_move': 'Significant price move prior to consolidation',
-                            'consolidation': '4 criteria: ≥3 candles, lower volume, lower ADR, price stability',
-                            'ma10_tolerance': 'Price near 10-day moving average',
-                            'reconsolidation': 'Volume control after breakout',
-                            'linear_moves': 'High R² correlation for linear trend',
-                            'avoid_barcode': 'Low average range to avoid erratic moves'
+                            'large_move': 'Move from LOW of start day to HIGH of end day must exceed 3x ADR',
+                            'consolidation': '4 criteria: ≥3 candles, lower volume vs move, lower ADR vs move, price stability ≤1.5% ADR',
+                            'above_50_sma': 'Most recent closing price must be above 50-day Simple Moving Average',
+                            'adr_range': 'Average Daily Range over last 20 days must be between 3% and 20%'
                           };
                           
                           return (
