@@ -41,7 +41,7 @@ export default function BacktestEngine() {
     const fetchStrategies = async () => {
       setLoadingStrategies(true)
       try {
-        const response = await fetch('http://localhost:8000/strategies')
+        const response = await fetch('http://localhost:8002/strategies')
         if (response.ok) {
           const strategiesData = await response.json()
           setStrategies(strategiesData)

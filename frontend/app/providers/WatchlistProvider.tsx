@@ -56,7 +56,7 @@ export const WatchlistProvider: React.FC<WatchlistProviderProps> = ({ children }
   const [error, setError] = useState<string | null>(null)
 
   // API base URL
-  const API_BASE_URL = 'http://localhost:8000'
+  const API_BASE_URL = 'http://localhost:8002'
 
   // Load selected watchlist from localStorage
   useEffect(() => {

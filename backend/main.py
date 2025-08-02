@@ -28,6 +28,10 @@ nyse_ticker_cache = None
 nyse_ticker_cache_time = 0
 NYSE_TICKER_CACHE_DURATION = 60 * 60 * 12  # 12 hours
 
+# Global cache for sector performance data
+sector_performance_cache = {}
+SECTOR_CACHE_DURATION = 60 * 60 * 2  # 2 hours
+
 
 app = FastAPI(title="Advanced Momentum Trading Strategy API", version="2.1.0")
 
@@ -579,7 +583,227 @@ def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, 
     
     return best_start, best_end, total_move_pct, move_details
 
-def check_momentum_pattern(hist_data: pd.DataFrame) -> tuple[bool, dict, float]:
+def calculate_sector_trend_strength(sector_etf: str) -> tuple[float, dict]:
+    """
+    Calculate Sector/Industry Trend Strength (STS) - a percentile ranking of how often
+    the sector ETF outperforms SPY over the past 20 trading days.
+    
+    Args:
+        sector_etf: Sector ETF symbol (e.g., 'XLK', 'XLV')
+    
+    Returns:
+        tuple: (sts_percentile, details_dict)
+            - sts_percentile: 0-100 percentile score
+            - details_dict: Additional calculation details
+    """
+    cache_key = f"sts_{sector_etf}_20d"
+    current_time = time.time()
+    
+    # Check cache first
+    if cache_key in sector_performance_cache:
+        cached_data = sector_performance_cache[cache_key]
+        if current_time - cached_data['timestamp'] < SECTOR_CACHE_DURATION:
+            return cached_data['sts_score'], cached_data['details']
+    
+    try:
+        # Get 25 days of data to ensure we have at least 20 trading days
+        sector_ticker = yf.Ticker(sector_etf)
+        sector_data = sector_ticker.history(period="30d", timeout=5)
+        
+        spy_ticker = yf.Ticker('SPY')
+        spy_data = spy_ticker.history(period="30d", timeout=5)
+        
+        if len(sector_data) < 20 or len(spy_data) < 20:
+            return 50.0, {"error": "Insufficient data", "days_available": min(len(sector_data), len(spy_data))}
+        
+        # Align data to common dates and get last 20 days
+        common_dates = sector_data.index.intersection(spy_data.index)
+        if len(common_dates) < 20:
+            return 50.0, {"error": "Insufficient common dates", "common_days": len(common_dates)}
+        
+        # Get last 20 trading days
+        recent_dates = common_dates[-20:]
+        sector_prices = sector_data.loc[recent_dates]['Close']
+        spy_prices = spy_data.loc[recent_dates]['Close']
+        
+        # Calculate daily returns for both
+        sector_returns = sector_prices.pct_change().dropna()
+        spy_returns = spy_prices.pct_change().dropna()
+        
+        if len(sector_returns) < 19:  # Need at least 19 daily returns from 20 days
+            return 50.0, {"error": "Insufficient return data", "returns_available": len(sector_returns)}
+        
+        # Calculate daily relative strength (sector return - spy return)
+        daily_relative_strength = sector_returns - spy_returns
+        
+        # Count how many days sector outperformed SPY
+        outperforming_days = (daily_relative_strength > 0).sum()
+        total_days = len(daily_relative_strength)
+        
+        # Calculate STS as percentile (0-100)
+        sts_percentile = (outperforming_days / total_days) * 100
+        
+        # Additional details for analysis
+        details = {
+            "outperforming_days": int(outperforming_days),
+            "total_days": int(total_days),
+            "avg_daily_outperformance": float(daily_relative_strength.mean() * 100),  # Convert to percentage
+            "sector_avg_return": float(sector_returns.mean() * 100),
+            "spy_avg_return": float(spy_returns.mean() * 100),
+            "calculation_period": "20 trading days"
+        }
+        
+        # Cache the result
+        sector_performance_cache[cache_key] = {
+            'sts_score': sts_percentile,
+            'details': details,
+            'timestamp': current_time
+        }
+        
+        return sts_percentile, details
+        
+    except Exception as e:
+        print(f"Error calculating STS for {sector_etf}: {e}")
+        return 50.0, {"error": str(e)}
+
+
+def get_industry_benchmark(stock_symbol: str) -> str:
+    """
+    Get the appropriate industry/sector ETF benchmark for a given stock.
+    
+    Args:
+        stock_symbol: The stock symbol to analyze
+    
+    Returns:
+        str: Industry ETF symbol, defaults to SPY if industry unknown
+    """
+    try:
+        ticker = yf.Ticker(stock_symbol)
+        info = ticker.info
+        
+        sector = info.get('sector', '').lower()
+        industry = info.get('industry', '').lower()
+        
+        # Mapping of sectors/industries to their corresponding ETFs
+        sector_etf_map = {
+            # Technology
+            'technology': 'XLK',
+            'information technology': 'XLK',
+            'software': 'XLK',
+            'semiconductors': 'SOXX',
+            'semiconductor': 'SOXX',
+            
+            # Healthcare
+            'healthcare': 'XLV',
+            'health care': 'XLV',
+            'biotechnology': 'XBI',
+            'pharmaceuticals': 'XPH',
+            
+            # Financial
+            'financial services': 'XLF',
+            'financial': 'XLF',
+            'banking': 'KBE',
+            'insurance': 'KIE',
+            'real estate': 'XLRE',
+            
+            # Energy
+            'energy': 'XLE',
+            'oil & gas': 'XLE',
+            'utilities': 'XLU',
+            
+            # Consumer
+            'consumer discretionary': 'XLY',
+            'consumer staples': 'XLP',
+            'retail': 'XRT',
+            'automotive': 'CARZ',
+            
+            # Industrial
+            'industrials': 'XLI',
+            'industrial': 'XLI',
+            'aerospace': 'ITA',
+            'defense': 'ITA',
+            'transportation': 'IYT',
+            
+            # Materials
+            'materials': 'XLB',
+            'basic materials': 'XLB',
+            'metals & mining': 'XME',
+            'gold': 'GDX',
+            
+            # Communication
+            'communication services': 'XLC',
+            'communication': 'XLC',
+            'telecommunications': 'XLC',
+            'media': 'XLC',
+            
+            # Other specific industries
+            'cannabis': 'MJ',
+            'gaming': 'ESPO',
+            'cloud computing': 'SKYY',
+            'cybersecurity': 'HACK',
+            'fintech': 'FINX',
+            'clean energy': 'ICLN',
+            'solar': 'TAN',
+            'robotics': 'ROBT',
+            'infrastructure': 'IFRA'
+        }
+        
+        # First try to match by specific industry
+        for industry_key, etf in sector_etf_map.items():
+            if industry_key in industry:
+                return etf
+        
+        # Then try to match by broader sector
+        for sector_key, etf in sector_etf_map.items():
+            if sector_key in sector:
+                return etf
+        
+        # Default to SPY if no specific industry match found
+        return 'SPY'
+        
+    except Exception as e:
+        print(f"Error getting industry benchmark for {stock_symbol}: {e}")
+        return 'SPY'
+
+def calculate_relative_strength_vs_industry(df: pd.DataFrame, stock_symbol: str) -> tuple[float, str, str, dict]:
+    """
+    Calculate Sector/Industry Trend Strength (STS) - a percentile ranking showing how often
+    the stock's sector/industry ETF outperforms SPY over the past 20 trading days.
+    
+    Returns a score where:
+    - 0-100 = Percentile ranking
+    - 70+ = Strong sector trend strength (threshold for criterion)
+    - Example: STS of 70 means sector outperformed SPY on 70% of the past 20 days
+    
+    Args:
+        df: Stock's OHLCV data (used for timeframe reference, not used in STS calc)
+        stock_symbol: Stock symbol to determine its industry
+    
+    Returns:
+        tuple: (sts_percentile, sector_etf_used, industry_name, details_dict)
+    """
+    try:
+        # Get the appropriate industry benchmark ETF
+        sector_etf = get_industry_benchmark(stock_symbol)
+        
+        # Get industry/sector information for display
+        try:
+            ticker = yf.Ticker(stock_symbol)
+            info = ticker.info
+            industry_name = info.get('industry', info.get('sector', 'Unknown'))
+        except:
+            industry_name = 'Unknown'
+        
+        # Calculate Sector/Industry Trend Strength (STS)
+        sts_score, sts_details = calculate_sector_trend_strength(sector_etf)
+        
+        return sts_score, sector_etf, industry_name, sts_details
+        
+    except Exception as e:
+        print(f"Error calculating sector trend strength: {e}")
+        return 50.0, 'SPY', 'Unknown', {"error": str(e)}
+
+def check_momentum_pattern(hist_data: pd.DataFrame, stock_symbol: str = None) -> tuple[bool, dict, float]:
     """
     Implement the updated "5 Star Trading Setup/Pattern Checklist" with 9 criteria.
     Returns: (pattern_found, criteria_details, confidence_score)
@@ -602,24 +826,33 @@ def check_momentum_pattern(hist_data: pd.DataFrame) -> tuple[bool, dict, float]:
     criteria_met = {}
     criteria_details = {}
     
-    # Criterion 1: Large percentage move detection (>3 ADR)
+    # Criterion 1: Large percentage move detection (>3 ADR + 0.5% per candle)
     start_candle, end_candle, move_pct, move_details = detect_momentum_move_boundaries(df)
     
     if start_candle != -1 and end_candle != -1:
         # Get current ADR (20-day average daily range)
         current_adr = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0  # Default to 5% if no ADR available
-        required_move = current_adr * 3  # Need 3x ADR
         
-        criteria_met['criterion1'] = move_pct > required_move
+        # ENHANCEMENT: Calculate adjusted threshold with ADR/candle factor
+        # Adjusted_Threshold = (3 × ADR) + (0.5% × number_of_move_candles)
+        number_of_move_candles = end_candle - start_candle + 1
+        base_threshold = current_adr * 3  # Base 3x ADR requirement
+        candle_factor = 0.5 * number_of_move_candles  # 0.5% per candle
+        adjusted_threshold = base_threshold + candle_factor
+        
+        criteria_met['criterion1'] = move_pct > adjusted_threshold
         criteria_details['criterion1'] = {
             'met': criteria_met['criterion1'],
             'move_pct': round(move_pct, 2),
             'adr_20': round(current_adr, 2),
-            'required_move': round(required_move, 2),
+            'base_threshold': round(base_threshold, 2),
+            'candle_factor': round(candle_factor, 2),
+            'adjusted_threshold': round(adjusted_threshold, 2),
+            'number_of_move_candles': number_of_move_candles,
             'start_candle': start_candle,
             'end_candle': end_candle,
             'move_details': move_details,
-            'description': f"Large move: {move_pct:.1f}% from {move_details['start_date']} to {move_details['end_date']} (need >{required_move:.1f}% = 3x ADR of {current_adr:.1f}%)"
+            'description': f"Large move: {move_pct:.1f}% from {move_details['start_date']} to {move_details['end_date']} (need >{adjusted_threshold:.1f}% = 3x ADR of {current_adr:.1f}% + 0.5% × {number_of_move_candles} candles = {base_threshold:.1f}% + {candle_factor:.1f}%)"
         }
     else:
         criteria_met['criterion1'] = False
@@ -697,13 +930,76 @@ def check_momentum_pattern(hist_data: pd.DataFrame) -> tuple[bool, dict, float]:
             'description': "Insufficient data for ADR calculation"
         }
     
+    # Criterion 6: Average Volume >= $1M
+    if len(df) >= 20:
+        # Calculate average volume over recent period (last 20 days)
+        recent_volume_data = df.tail(20)
+        avg_volume = recent_volume_data['Volume'].mean()
+        avg_price = recent_volume_data['Close'].mean()
+        avg_dollar_volume = avg_volume * avg_price  # Average dollar volume
+        
+        volume_threshold = 1_000_000  # $1M threshold
+        criteria_met['criterion6'] = avg_dollar_volume >= volume_threshold
+        criteria_details['criterion6'] = {
+            'met': criteria_met['criterion6'],
+            'avg_dollar_volume': round(avg_dollar_volume, 0),
+            'threshold': volume_threshold,
+            'avg_volume': round(avg_volume, 0),
+            'avg_price': round(avg_price, 2),
+            'description': f"Average Volume: ${avg_dollar_volume:,.0f} (need ≥${volume_threshold:,}) - Why it matters: Confirms liquidity and reliability of price action"
+        }
+    else:
+        criteria_met['criterion6'] = False
+        criteria_details['criterion6'] = {
+            'met': False,
+            'avg_dollar_volume': 0,
+            'threshold': 1_000_000,
+            'avg_volume': 0,
+            'avg_price': 0,
+            'description': "Insufficient data for volume calculation"
+        }
+    
+    # Criterion 7: Sector/Industry Trend Strength > 70 (vs SPY over 20 days)
+    try:
+        if stock_symbol:
+            sts_score, industry_benchmark, industry_name, sts_details = calculate_relative_strength_vs_industry(df, stock_symbol)
+        else:
+            sts_score, industry_benchmark, industry_name, sts_details = 50.0, 'SPY', 'Unknown', {}
+        
+        criteria_met['criterion7'] = sts_score >= 70
+        
+        # Create detailed description based on STS calculation
+        outperforming_days = sts_details.get('outperforming_days', 0)
+        total_days = sts_details.get('total_days', 20)
+        
+        criteria_details['criterion7'] = {
+            'met': criteria_met['criterion7'],
+            'relative_strength': round(sts_score, 1),
+            'threshold': 70.0,
+            'industry_benchmark': industry_benchmark,
+            'industry_name': industry_name,
+            'outperforming_days': outperforming_days,
+            'total_days': total_days,
+            'description': f"Sector Trend Strength (STS): {sts_score:.1f} (need ≥70) - {industry_name} sector ({industry_benchmark}) outperformed SPY on {outperforming_days}/{total_days} days (past 20 trading days). STS={sts_score:.0f}% means sector was stronger than SPY on {sts_score:.0f}% of recent trading days"
+        }
+    except Exception as e:
+        criteria_met['criterion7'] = False
+        criteria_details['criterion7'] = {
+            'met': False,
+            'relative_strength': 0,
+            'threshold': 70.0,
+            'industry_benchmark': 'SPY',
+            'industry_name': 'Unknown',
+            'description': f"Sector trend strength calculation failed: {str(e)}"
+        }
+    
     # Calculate total criteria met
-    total_criteria = 4  # 1, 2&3, 4, 5
+    total_criteria = 6  # 1, 2&3, 4, 5, 6, 7
     criteria_met_count = sum(criteria_met.values())
     confidence_score = (criteria_met_count / total_criteria) * 100
     
-    # Pattern found if at least 3 out of 4 criteria met
-    pattern_found = criteria_met_count >= 3
+    # Pattern found if at least 4 out of 6 criteria met
+    pattern_found = criteria_met_count >= 4
     
     return pattern_found, criteria_details, confidence_score
 
@@ -1349,7 +1645,7 @@ async def screen_momentum(request: ScreeningRequest):
                 continue
             
             # Run momentum analysis using updated function
-            pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist)
+            pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist, clean_symbol)
             
             # Get company name
             try:
@@ -1373,7 +1669,9 @@ async def screen_momentum(request: ScreeningRequest):
                 'large_move': criteria_details.get('criterion1', {}).get('met', False),
                 'consolidation': criteria_details.get('criterion2_3', {}).get('met', False),
                 'above_50_sma': criteria_details.get('criterion4', {}).get('met', False),
-                'adr_range': criteria_details.get('criterion5', {}).get('met', False)
+                'adr_range': criteria_details.get('criterion5', {}).get('met', False),
+                'avg_volume': criteria_details.get('criterion6', {}).get('met', False),
+                'industry_strength': criteria_details.get('criterion7', {}).get('met', False)
             }
             
             total_met = sum(criteria_met.values())
@@ -1455,7 +1753,7 @@ async def screen_momentum_stream(request: ScreeningRequest):
                     continue
                 
                 # Run momentum analysis using updated function
-                pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist)
+                pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist, clean_symbol)
                 
                 # Get company name
                 try:
@@ -1479,7 +1777,9 @@ async def screen_momentum_stream(request: ScreeningRequest):
                     'large_move': criteria_details.get('criterion1', {}).get('met', False),
                     'consolidation': criteria_details.get('criterion2_3', {}).get('met', False),
                     'above_50_sma': criteria_details.get('criterion4', {}).get('met', False),
-                    'adr_range': criteria_details.get('criterion5', {}).get('met', False)
+                    'adr_range': criteria_details.get('criterion5', {}).get('met', False),
+                    'avg_volume': criteria_details.get('criterion6', {}).get('met', False),
+                    'industry_strength': criteria_details.get('criterion7', {}).get('met', False)
                 }
                 
                 total_met = sum(criteria_met.values())
@@ -1493,7 +1793,7 @@ async def screen_momentum_stream(request: ScreeningRequest):
                 )
                 
                 # Only include stocks that meet minimum criteria
-                if total_met >= 2:  # At least 2 criteria met
+                if total_met >= 3:  # At least 3 out of 6 criteria met
                     results.append(result)
                     yield f"data: {json.dumps({'type': 'result', 'result': result.dict(), 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Found pattern in {clean_symbol} ({total_met}/6 criteria)'})}\n\n"
                 else:
@@ -1530,7 +1830,7 @@ async def analyze_momentum_pattern(
             raise HTTPException(status_code=404, detail=f"Insufficient historical data for analysis of '{symbol}'")
         
         # Run updated momentum analysis
-        pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist)
+        pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist, symbol.upper())
         
         # Determine pattern strength
         if confidence_score >= 80:
@@ -1550,11 +1850,11 @@ Pattern Strength: {strength}
 
 📊 DETAILED CRITERIA ANALYSIS:
 
-1. LARGE MOVE (>3 ADR in last 30 days):
+1. LARGE MOVE (Enhanced with ADR/Candle Factor):
    Status: {'✅ PASSED' if criteria_details.get('criterion1', {}).get('met', False) else '❌ FAILED'}
    {criteria_details.get('criterion1', {}).get('description', 'Analysis not available')}
 
-2. CONSOLIDATION PATTERN (New 4-Criteria Analysis):
+2. CONSOLIDATION PATTERN (Enhanced with Weighted Outlier Analysis):
    Status: {'✅ PASSED' if criteria_details.get('criterion2_3', {}).get('met', False) else '❌ FAILED'}
    {criteria_details.get('criterion2_3', {}).get('description', 'Analysis not available')}
    
@@ -1562,7 +1862,8 @@ Pattern Strength: {strength}
    • Candle Count: {'✅' if criteria_details.get('criterion2_3', {}).get('consolidation_candles', 0) >= 3 else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_candles', 0)} candles (need ≥3)
    • Volume: {'✅' if criteria_details.get('criterion2_3', {}).get('volume_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_avg_volume', 0):.0f} vs {criteria_details.get('criterion2_3', {}).get('move_avg_volume', 0):.0f} (consolidation < move)
    • Daily Range: {'✅' if criteria_details.get('criterion2_3', {}).get('range_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_avg_adr', 0):.1f}% vs {criteria_details.get('criterion2_3', {}).get('move_avg_adr', 0):.1f}% (consolidation < move)
-   • Price Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('price_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('price_difference_adr', 0):.1f}% difference (need ≤{criteria_details.get('criterion2_3', {}).get('current_adr_20', 0):.1f}% 20-day ADR)
+   • Price Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('price_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('price_difference_adr', 0):.1f}% difference (need ≤{criteria_details.get('criterion2_3', {}).get('consolidation_avg_adr', 0):.1f}% consolidation ADR)
+   • Weighted Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('stability_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('weighted_stability', 0):.2f} (need ≤2.5) - Penalizes extreme outlier candles
 
 4. PRICE ABOVE 50 SMA:
    Status: {'✅ PASSED' if criteria_details.get('criterion4', {}).get('met', False) else '❌ FAILED'}
@@ -1572,11 +1873,26 @@ Pattern Strength: {strength}
    Status: {'✅ PASSED' if criteria_details.get('criterion5', {}).get('met', False) else '❌ FAILED'}
    {criteria_details.get('criterion5', {}).get('description', 'Analysis not available')}
 
+6. AVERAGE VOLUME ≥ $1M:
+   Status: {'✅ PASSED' if criteria_details.get('criterion6', {}).get('met', False) else '❌ FAILED'}
+   {criteria_details.get('criterion6', {}).get('description', 'Analysis not available')}
+
+7. SECTOR TREND STRENGTH (STS) ≥70:
+   Status: {'✅ PASSED' if criteria_details.get('criterion7', {}).get('met', False) else '❌ FAILED'}
+   {criteria_details.get('criterion7', {}).get('description', 'Analysis not available')}
+
 📈 SUMMARY:
 This stock {'shows' if pattern_found else 'does not show'} {strength.lower()} momentum pattern characteristics 
-with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in [1, '2_3', 4, 5]])} out of 4 criteria satisfied.
+with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in [1, '2_3', 4, 5, 6, 7]])} out of 6 criteria satisfied.
 
-{'The pattern suggests potential continuation of the current trend based on the 5 Star Trading Setup methodology.' if pattern_found else 'Consider waiting for better setup conditions or look for alternative opportunities.'}
+{'The pattern suggests potential continuation of the current trend based on the Enhanced 5 Star Trading Setup methodology.' if pattern_found else 'Consider waiting for better setup conditions or look for alternative opportunities.'}
+
+🔧 ENHANCEMENTS APPLIED:
+• Weighted outlier analysis for consolidation stability
+• Dynamic threshold adjustment based on move duration  
+• Corrected consolidation ADR calculation
+• Liquidity validation through average volume
+• Sector Trend Strength (STS) analysis measuring how often sector outperforms SPY over past 20 trading days with automatic sector ETF selection
         """.strip()
         
         # Create criteria met dictionary first
@@ -1584,7 +1900,9 @@ with {sum([criteria_details.get(f'criterion{i}', {}).get('met', False) for i in 
             'large_move': criteria_details.get('criterion1', {}).get('met', False),
             'consolidation': criteria_details.get('criterion2_3', {}).get('met', False),
             'above_50_sma': criteria_details.get('criterion4', {}).get('met', False),
-            'adr_range': criteria_details.get('criterion5', {}).get('met', False)
+            'adr_range': criteria_details.get('criterion5', {}).get('met', False),
+            'avg_volume': criteria_details.get('criterion6', {}).get('met', False),
+            'industry_strength': criteria_details.get('criterion7', {}).get('met', False)
         }
         
         # Generate interactive chart using Plotly
@@ -2029,11 +2347,12 @@ async def health_check():
 
 def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move_end_idx: int) -> tuple[bool, dict]:
     """
-    New consolidation pattern detection based on 4 criteria:
+    Enhanced consolidation pattern detection with weighted outlier analysis based on 4 criteria:
     1. Number of candles in consolidation >= 3
     2. Average volume during consolidation < average volume during move up
-    3. Average daily range during consolidation < average daily range during move up  
+    3. Average daily range during consolidation < average daily range during move up (FIXED to use consolidation period ADR)
     4. Most recent candle is at most 1 ADR away from first consolidation candle
+    5. Weighted stability calculation to penalize outlier candles
     
     Args:
         df: DataFrame with OHLCV data
@@ -2072,31 +2391,46 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     move_daily_ranges = (move_data['High'] - move_data['Low']) / move_data['Open'] * 100
     move_avg_adr = move_daily_ranges.mean()
     
+    # FIXED: Calculate consolidation ADR using correct formula over consolidation period only
+    # Consolidation_ADR = average( abs(high - low) / close ) over consolidation_candles
+    consolidation_daily_ranges = abs(consolidation_data['High'] - consolidation_data['Low']) / consolidation_data['Close'] * 100
+    consolidation_avg_adr = consolidation_daily_ranges.mean()
+    
+    # ENHANCEMENT: Calculate weighted stability to penalize outlier candles
+    # Weighted_Stability = Σ( (candle_range / avg_range)² ) / total_candles
+    if consolidation_avg_adr > 0:
+        weighted_stability_sum = sum((candle_range / consolidation_avg_adr) ** 2 for candle_range in consolidation_daily_ranges)
+        weighted_stability = weighted_stability_sum / consolidation_candles
+    else:
+        weighted_stability = 0
+    
     # Criterion 2: Average volume during consolidation < average volume during move up
     move_avg_volume = move_data['Volume'].mean()
     consolidation_avg_volume = consolidation_data['Volume'].mean()
     volume_criterion_met = consolidation_avg_volume < move_avg_volume
     
     # Criterion 3: Average daily range during consolidation < average daily range during move up
-    consolidation_daily_ranges = (consolidation_data['High'] - consolidation_data['Low']) / consolidation_data['Open'] * 100
-    consolidation_avg_adr = consolidation_daily_ranges.mean()
     range_criterion_met = consolidation_avg_adr < move_avg_adr
     
     # Criterion 4: Most recent candle close is at most 1 ADR away from first consolidation candle close
-    # Use the 20-day ADR that was already calculated
-    current_adr_20 = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0
+    # Use the consolidation period ADR for consistency
     first_consolidation_close = consolidation_data.iloc[0]['Close']
     most_recent_close = consolidation_data.iloc[-1]['Close']
     price_difference = abs(most_recent_close - first_consolidation_close)
     price_difference_adr = price_difference / first_consolidation_close * 100
-    price_criterion_met = price_difference_adr <= current_adr_20
+    price_criterion_met = price_difference_adr <= consolidation_avg_adr
+    
+    # Enhanced criterion: Weighted stability should be reasonable (not too many extreme outliers)
+    # A value close to 1.0 indicates normal distribution, higher values indicate more outliers
+    stability_criterion_met = weighted_stability <= 2.5  # Allow some outliers but penalize excessive volatility
     
     # All criteria must be met
     consolidation_found = (
         consolidation_candles >= 3 and
         volume_criterion_met and
         range_criterion_met and
-        price_criterion_met
+        price_criterion_met and
+        stability_criterion_met
     )
     
     consolidation_details = {
@@ -2114,8 +2448,9 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         'price_criterion_met': price_criterion_met,
         'first_consolidation_close': round(first_consolidation_close, 2),
         'most_recent_close': round(most_recent_close, 2),
-        'current_adr_20': round(current_adr_20, 2),
-        'description': f"Consolidation: {consolidation_candles} days, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}%, close diff {price_difference_adr:.1f}% (≤{current_adr_20:.1f}%)"
+        'weighted_stability': round(weighted_stability, 2),
+        'stability_criterion_met': stability_criterion_met,
+        'description': f"Consolidation: {consolidation_candles} days, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}%, close diff {price_difference_adr:.1f}% (≤{consolidation_avg_adr:.1f}%), stability {weighted_stability:.2f} (≤2.5)"
     }
     
     return consolidation_found, consolidation_details
@@ -2306,4 +2641,4 @@ async def remove_from_watchlist(symbol: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8002) 

@@ -41,7 +41,7 @@ const WatchlistDetail: React.FC<WatchlistDetailProps> = ({ watchlistId, onClose 
     try {
       const promises = watchlist.symbols.map(async (symbol) => {
         try {
-          const response = await fetch(`http://localhost:8000/ticker/${symbol}?range=1d`)
+          const response = await fetch(`http://localhost:8002/ticker/${symbol}?range=1d`)
           if (response.ok) {
             const data = await response.json()
             newStockData[symbol] = {
