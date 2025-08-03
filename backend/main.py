@@ -354,7 +354,13 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, dict]:
     """
-    Improved momentum move detection with better start/end identification.
+    Enhanced momentum move detection that prioritizes recent consolidation breakouts.
+    
+    Key improvements:
+    1. Find consolidation periods first
+    2. Look for breakouts from consolidation 
+    3. Strong recency bias (10x preference for recent moves)
+    4. Require volume confirmation during momentum phase
     
     Returns:
         tuple: (start_candle_index, end_candle_index, total_move_pct, move_details)
@@ -376,8 +382,8 @@ def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, 
     current_adr = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0
     required_move = current_adr * 3  # Need 3x ADR
     
-    # Look for the most recent significant move in the last 60 days
-    lookback_days = min(60, len(df))
+    # Look for the most recent significant move in the last 45 days (reduced from 60)
+    lookback_days = min(45, len(df))
     recent_data = df.tail(lookback_days).copy()
     
     best_move = 0.0
@@ -385,172 +391,174 @@ def detect_momentum_move_boundaries(df: pd.DataFrame) -> tuple[int, int, float, 
     best_end = -1
     best_score = 0.0
     
-    # IMPROVED: More sophisticated move detection with recency focus
-    # Test different start points (from 30 days ago to 10 days ago) - more recent focus
-    for start_idx in range(len(recent_data) - 30, len(recent_data) - 10):
-        if start_idx < 0:
+    # STEP 1: Find consolidation periods first, then look for breakouts
+    # RECENCY REQUIREMENT: Only moves within last 25 days (no old moves!)
+    max_days_old = 25
+    earliest_start = max(10, len(recent_data) - max_days_old)
+    
+    for potential_start in range(len(recent_data) - 5, earliest_start, -1):
+        if potential_start < 10:  # Need at least 10 days of prior data for consolidation analysis
             continue
             
-        # IMPROVED: Check for gap-up conditions and momentum characteristics
-        start_momentum_5 = recent_data.iloc[start_idx]['momentum_5']
-        start_momentum_10 = recent_data.iloc[start_idx]['momentum_10']
-        start_volume_momentum = recent_data.iloc[start_idx]['volume_momentum']
-        
-        # Check for gap-up potential (next day has big move)
-        has_gap_up = False
-        if start_idx + 1 < len(recent_data):
-            next_day_gap = ((recent_data.iloc[start_idx + 1]['Open'] - recent_data.iloc[start_idx]['Close']) / 
-                           recent_data.iloc[start_idx]['Close']) * 100
-            next_day_volume_spike = recent_data.iloc[start_idx + 1]['volume_ratio']
-            
-            # If next day has gap up > 3% and volume spike > 2x, this could be the start
-            if next_day_gap > 3.0 and next_day_volume_spike > 2.0:
-                has_gap_up = True
-        
-        # Skip if no momentum at start AND no gap-up potential
-        if not has_gap_up and start_momentum_5 < 2.0 and start_momentum_10 < 3.0:
+        # STEP 2: Check for consolidation period BEFORE this potential start
+        lookback_period = min(10, potential_start)  # Look back up to 10 days for consolidation
+        if lookback_period < 5:
             continue
             
-        # Calculate move from this start point to different end points
-        for end_idx in range(start_idx + 5, len(recent_data)):
-            start_price = recent_data.iloc[start_idx]['Low']  # Use LOW of start day
-            end_price = recent_data.iloc[end_idx]['High']     # Use HIGH of end day
+        consol_start = potential_start - lookback_period
+        consol_data = recent_data.iloc[consol_start:potential_start]
+        
+        # Consolidation criteria (must be tight, low volume, low momentum)
+        consol_range = (consol_data['High'].max() - consol_data['Low'].min()) / consol_data['Open'].mean() * 100
+        consol_volume_avg = consol_data['volume_ratio'].mean()
+        consol_momentum_avg = consol_data['momentum_5'].abs().mean()
+        consol_momentum_std = consol_data['momentum_5'].std()
+        
+        # RELAXED consolidation requirements for better recent move detection
+        # Make requirements more lenient for recent moves to avoid missing good patterns
+        is_valid_consolidation = (
+            consol_range < current_adr * 5.0 and  # More relaxed range (5.0x ADR - allows more movement)
+            consol_volume_avg < 1.5 and  # More relaxed volume requirement  
+            consol_momentum_avg < current_adr * 3.0 and  # Allow more momentum during consolidation
+            consol_momentum_std < current_adr * 2.5  # Allow more volatility
+        )
+        
+        # RELAXED: Allow moves even without perfect consolidation 
+        # Give preference to moves with consolidation, but don't eliminate others
+        consolidation_quality_bonus = 3.0 if is_valid_consolidation else 1.0
+            
+        # STEP 3: Look for breakout from this consolidation
+        # Check multiple potential end points for the momentum move
+        for potential_end in range(potential_start + 3, min(potential_start + 10, len(recent_data))):
+            start_price = recent_data.iloc[potential_start]['Low']  # Breakout start
+            end_price = recent_data.iloc[potential_end]['High']     # Momentum high
             
             if start_price <= 0:
                 continue
                 
             move_pct = ((end_price - start_price) / start_price) * 100
+            move_duration = potential_end - potential_start + 1
             
-            # Check if this is a significant move and not too long
-            move_duration = end_idx - start_idx + 1
-            if move_pct >= required_move and move_duration <= 12:  # Max 12 days for a move (reduced from 15)
-                # IMPROVED: Calculate move quality score
-                move_data = recent_data.iloc[start_idx:end_idx+1]
+            # ENHANCED: Sharp move requirements - quick and intense only
+            if move_pct < required_move or move_duration > 6:  # Maximum 6 days for sharp moves
+                continue
                 
-                # 1. Upward bias (60% up days)
-                up_days = sum(1 for i in range(start_idx, end_idx + 1) 
-                            if recent_data.iloc[i]['price_change_pct'] > 0)
-                total_days = end_idx - start_idx + 1
-                up_ratio = up_days / total_days if total_days > 0 else 0
+            # Calculate move velocity (% per day) - must be sharp and fast
+            move_velocity = move_pct / move_duration
+            min_velocity = current_adr * 0.6  # Need at least 0.6x ADR per day for sharpness (relaxed)
+            if move_velocity < min_velocity:
+                continue
                 
-                if up_ratio < 0.6:
-                    continue
+            # STEP 4: Analyze the momentum move quality
+            move_data = recent_data.iloc[potential_start:potential_end+1]
+            
+            # SHARP MOVE QUALITY ANALYSIS - strict requirements for momentum bursts
+            up_days = sum(1 for i in range(len(move_data)) 
+                         if move_data.iloc[i]['price_change_pct'] > 0)
+            up_ratio = up_days / len(move_data) if len(move_data) > 0 else 0
+            
+            # VOLUME SURGE REQUIREMENT - must have strong volume during momentum
+            avg_volume_ratio = move_data['volume_ratio'].mean()
+            max_volume_ratio = move_data['volume_ratio'].max()
+            volume_surge = max_volume_ratio  # Peak volume during move
+            
+            # REQUIRE significant volume surge for sharp moves  
+            if avg_volume_ratio < 1.2 or volume_surge < 1.8:  # Need both avg volume AND a surge (slightly relaxed)
+                continue
                 
-                # 2. Volume confirmation
-                avg_volume_ratio = move_data['volume_ratio'].mean()
-                volume_score = min(avg_volume_ratio / 1.5, 2.0)  # Cap at 2.0
+            # MOMENTUM CONSISTENCY - most days must show strong momentum  
+            strong_momentum_days = sum(1 for i in range(len(move_data)) 
+                                     if move_data.iloc[i]['momentum_5'] > current_adr)
+            momentum_consistency = strong_momentum_days / len(move_data)
+            
+            # Require high momentum consistency for sharp moves
+            if momentum_consistency < 0.6:  # 60% of days must have strong momentum
+                continue
                 
-                # 3. Momentum consistency
-                momentum_consistency = 0
-                for i in range(start_idx, end_idx + 1):
-                    if recent_data.iloc[i]['momentum_5'] > 0:
-                        momentum_consistency += 1
-                momentum_score = momentum_consistency / total_days
+            # *** CRITICAL: CHECK FOR POST-MOVE CONSOLIDATION ***
+            # True momentum moves should be followed by consolidation/digestion
+            post_move_consolidation_bonus = 1.0
+            
+            # Check if there's sufficient data after the move for consolidation analysis
+            post_move_days_available = len(recent_data) - potential_end - 1
+            if post_move_days_available >= 5:  # Need at least 5 days after move
+                # Analyze the 5-10 days AFTER the momentum move
+                post_move_end = min(potential_end + 10, len(recent_data) - 1)
+                post_move_start = potential_end + 1
                 
-                # 4. Check for consolidation breakout
-                consolidation_bonus = 1.0
-                if start_idx >= 5:
-                    pre_move_data = recent_data.iloc[start_idx-5:start_idx]
+                if post_move_end > post_move_start:
+                    post_move_data = recent_data.iloc[post_move_start:post_move_end+1]
                     
-                    # More strict consolidation detection
-                    pre_move_range = (pre_move_data['High'].max() - pre_move_data['Low'].min()) / pre_move_data['Open'].mean() * 100
-                    pre_move_volume_avg = pre_move_data['volume_ratio'].mean()
-                    pre_move_momentum = pre_move_data['momentum_5'].abs().mean()
+                    # Check for consolidation characteristics AFTER the move
+                    post_range = (post_move_data['High'].max() - post_move_data['Low'].min()) / post_move_data['Close'].iloc[0] * 100
+                    post_volume_avg = post_move_data['volume_ratio'].mean()
+                    post_momentum_avg = post_move_data['momentum_5'].abs().mean()
                     
-                    # Check if it was truly consolidating
-                    is_consolidation = (
-                        pre_move_range < current_adr * 2.5 and  # Tighter range
-                        pre_move_volume_avg < 1.2 and  # Lower volume
-                        pre_move_momentum < current_adr * 0.5 and  # Low momentum
-                        pre_move_data['momentum_5'].std() < current_adr * 0.3  # Consistent low momentum
+                    # Good post-move consolidation: tight range, lower volume, less momentum
+                    has_post_consolidation = (
+                        post_range < current_adr * 3.0 and  # Tight range after move
+                        post_volume_avg < avg_volume_ratio * 0.8 and  # Volume cooling off
+                        post_momentum_avg < current_adr * 1.5  # Less momentum (digestion)
                     )
                     
-                    if is_consolidation:
-                        consolidation_bonus = 2.0  # 100% bonus for true consolidation breakouts
-                
-                # 5. Calculate recency bias (favor more recent moves)
-                days_from_end = len(recent_data) - end_idx
-                recency_bonus = max(1.0, 3.0 - (days_from_end * 0.1))  # Recent moves get up to 3x bonus
-                
-                # 6. Calculate overall score
-                base_score = move_pct
-                quality_score = (up_ratio * 0.3 + volume_score * 0.3 + momentum_score * 0.4) * 100
-                final_score = (base_score + quality_score) * consolidation_bonus * recency_bonus
-                
-                if final_score > best_score:
-                    best_score = final_score
-                    best_move = move_pct
-                    best_start = len(df) - lookback_days + start_idx
-                    best_end = len(df) - lookback_days + end_idx
-    
-    # IMPROVED: Find the actual momentum peak within the move
-    if best_start != -1 and best_end != -1:
-        move_data = df.iloc[best_start:best_end+1]
-        
-        # Find the peak momentum point, prioritizing price highs
-        peak_momentum_idx = best_start
-        peak_momentum_value = 0
-        peak_high = df.iloc[best_start]['High']
-        
-        for i in range(best_start, best_end + 1):
-            current_momentum = df.iloc[i]['momentum_5']
-            current_volume = df.iloc[i]['volume_ratio']
-            current_high = df.iloc[i]['High']
-            
-            # Combined momentum score (momentum + volume)
-            momentum_score = current_momentum * min(current_volume, 3.0)  # Cap volume at 3x
-            
-            # Prioritize higher highs - if this candle has a higher high, it's likely the peak
-            if current_high > peak_high:
-                peak_high = current_high
-                peak_momentum_idx = i
-                peak_momentum_value = momentum_score
-            elif current_high == peak_high and momentum_score > peak_momentum_value:
-                # If same high, prefer higher momentum
-                peak_momentum_value = momentum_score
-                peak_momentum_idx = i
-        
-        # Now look forward from peak momentum to find where consolidation begins
-        consolidation_start = peak_momentum_idx
-        
-        # Track consecutive consolidation signals
-        consolidation_signals = 0
-        max_consolidation_signals = 2  # Allow 2 consecutive consolidation signals before ending
-        
-        for i in range(peak_momentum_idx + 1, min(peak_momentum_idx + 8, len(df))):  # Increased look-ahead from 5 to 8
-            current_momentum = df.iloc[i]['momentum_5']
-            current_volume = df.iloc[i]['volume_ratio']
-            current_close = df.iloc[i]['Close']
-            current_open = df.iloc[i]['Open']
-            prev_close = df.iloc[i-1]['Close']
-            
-            # More relaxed consolidation signals
-            is_red_candle = current_close < current_open
-            is_lower_close = current_close < prev_close
-            is_low_momentum = current_momentum < 2.0  # Relaxed from 3.0 to 2.0
-            is_low_volume = current_volume < 0.8  # Relaxed from 1.0 to 0.8
-            
-            # Check if this candle shows consolidation
-            # Prioritize price action over momentum - if price is lower than previous high, it's consolidation
-            prev_high = df.iloc[i-1]['High']
-            current_high = df.iloc[i]['High']
-            is_lower_high = current_high < prev_high  # This is the key addition
-            
-            consolidation_signal = is_red_candle or is_lower_close or is_low_momentum or is_low_volume or is_lower_high
-            
-            if consolidation_signal:
-                consolidation_signals += 1
-                # Only end if we see multiple consecutive consolidation signals
-                if consolidation_signals >= max_consolidation_signals:
-                    consolidation_start = i - max_consolidation_signals  # End before the consolidation signals
-                    break
+                    if has_post_consolidation:
+                        post_move_consolidation_bonus = 3.0  # HUGE bonus for proper post-move consolidation
+                    else:
+                        # No proper consolidation after - significant penalty
+                        post_move_consolidation_bonus = 0.3
             else:
-                # Reset consolidation signal counter if we see momentum continuation
-                consolidation_signals = 0
-                consolidation_start = i  # Update end point to include this momentum candle
-        
-        best_end = max(peak_momentum_idx, consolidation_start)
+                # Move too recent to check post-consolidation - neutral score
+                post_move_consolidation_bonus = 1.0
+                
+            # Calculate quality scores for final scoring
+            volume_score = min(avg_volume_ratio / 1.5, 3.0)  # Allow higher volume scores
+            momentum_ratio = momentum_consistency
+            
+            # 4. Use the consolidation quality bonus calculated above
+            consolidation_bonus = consolidation_quality_bonus
+            
+            # 5. MODEST recency bias - allow move strength to dominate
+            days_from_end = len(recent_data) - potential_end
+            # Gentle recency preference that doesn't override move quality
+            if days_from_end <= 7:
+                recency_bonus = 2.5   # Modest bonus for recent moves (last week)
+            elif days_from_end <= 14:
+                recency_bonus = 2.0   # Small bonus for somewhat recent (last 2 weeks)
+            elif days_from_end <= 21:
+                recency_bonus = 1.5   # Tiny bonus for moderately recent (last 3 weeks)
+            else:
+                recency_bonus = 1.0   # Base score for older moves
+            
+            # 6. VELOCITY-BASED SCORING - prioritize sharp, fast moves with volume surges
+            velocity_score = move_velocity * 10.0  # 10x weight for velocity (% per day)
+            volume_surge_score = volume_surge * 5.0  # 5x weight for volume surge
+            move_strength_score = move_pct * 3.0  # 3x weight for total move size
+            quality_score = (up_ratio * 0.3 + momentum_ratio * 0.7) * 20  # Favor momentum consistency
+            
+            # Sharp moves get massive bonuses
+            velocity_bonus = 1.0
+            if move_velocity > current_adr * 1.5:  # Very sharp moves (>1.5x ADR per day)
+                velocity_bonus = 3.0
+            elif move_velocity > current_adr * 1.0:  # Sharp moves (>1x ADR per day)  
+                velocity_bonus = 2.0
+                
+            # Duration penalty for longer moves
+            duration_penalty = 1.0
+            if move_duration <= 3:
+                duration_penalty = 2.0  # Bonus for very quick moves
+            elif move_duration <= 5:
+                duration_penalty = 1.5  # Bonus for quick moves
+            
+            final_score = (velocity_score + volume_surge_score + move_strength_score + quality_score) * consolidation_bonus * recency_bonus * velocity_bonus * duration_penalty * post_move_consolidation_bonus
+            
+            if final_score > best_score:
+                best_score = final_score
+                best_move = move_pct
+                best_start = len(df) - lookback_days + potential_start
+                best_end = len(df) - lookback_days + potential_end
     
+    # The new algorithm already identifies precise boundaries, so no need for complex post-processing
+    # Just validate we found a valid move
     if best_start == -1 or best_end == -1:
         return -1, -1, 0.0, {}
     
@@ -833,26 +841,22 @@ def check_momentum_pattern(hist_data: pd.DataFrame, stock_symbol: str = None) ->
         # Get current ADR (20-day average daily range)
         current_adr = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0  # Default to 5% if no ADR available
         
-        # ENHANCEMENT: Calculate adjusted threshold with ADR/candle factor
-        # Adjusted_Threshold = (3 × ADR) + (0.5% × number_of_move_candles)
+        # SIMPLIFIED: Use only 3x ADR threshold (removed candle factor per user request)
+        # This allows for more sensitive detection of recent momentum moves
         number_of_move_candles = end_candle - start_candle + 1
-        base_threshold = current_adr * 3  # Base 3x ADR requirement
-        candle_factor = 0.5 * number_of_move_candles  # 0.5% per candle
-        adjusted_threshold = base_threshold + candle_factor
+        base_threshold = current_adr * 3  # Base 3x ADR requirement only
         
-        criteria_met['criterion1'] = move_pct > adjusted_threshold
+        criteria_met['criterion1'] = move_pct > base_threshold
         criteria_details['criterion1'] = {
             'met': criteria_met['criterion1'],
             'move_pct': round(move_pct, 2),
             'adr_20': round(current_adr, 2),
             'base_threshold': round(base_threshold, 2),
-            'candle_factor': round(candle_factor, 2),
-            'adjusted_threshold': round(adjusted_threshold, 2),
             'number_of_move_candles': number_of_move_candles,
             'start_candle': start_candle,
             'end_candle': end_candle,
             'move_details': move_details,
-            'description': f"Large move: {move_pct:.1f}% from {move_details['start_date']} to {move_details['end_date']} (need >{adjusted_threshold:.1f}% = 3x ADR of {current_adr:.1f}% + 0.5% × {number_of_move_candles} candles = {base_threshold:.1f}% + {candle_factor:.1f}%)"
+            'description': f"Large move: {move_pct:.1f}% from {move_details['start_date']} to {move_details['end_date']} (need >{base_threshold:.1f}% = 3x ADR of {current_adr:.1f}%)"
         }
     else:
         criteria_met['criterion1'] = False
@@ -868,7 +872,9 @@ def check_momentum_pattern(hist_data: pd.DataFrame, stock_symbol: str = None) ->
         }
     
     # Criteria 2 & 3: New consolidation pattern detection using move boundaries
-    consolidation_found, consolidation_details = detect_consolidation_pattern_new(df, start_candle, end_candle)
+    # Pass the 20-day ADR for correct price stability comparison
+    current_adr_20 = df['ADR_20'].iloc[-1] if not pd.isna(df['ADR_20'].iloc[-1]) else 5.0
+    consolidation_found, consolidation_details = detect_consolidation_pattern_new(df, start_candle, end_candle, current_adr_20)
     
     criteria_met['criterion2_3'] = consolidation_found
     criteria_details['criterion2_3'] = consolidation_details
@@ -1862,7 +1868,7 @@ Pattern Strength: {strength}
    • Candle Count: {'✅' if criteria_details.get('criterion2_3', {}).get('consolidation_candles', 0) >= 3 else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_candles', 0)} candles (need ≥3)
    • Volume: {'✅' if criteria_details.get('criterion2_3', {}).get('volume_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_avg_volume', 0):.0f} vs {criteria_details.get('criterion2_3', {}).get('move_avg_volume', 0):.0f} (consolidation < move)
    • Daily Range: {'✅' if criteria_details.get('criterion2_3', {}).get('range_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_avg_adr', 0):.1f}% vs {criteria_details.get('criterion2_3', {}).get('move_avg_adr', 0):.1f}% (consolidation < move)
-   • Price Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('price_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('price_difference_adr', 0):.1f}% difference (need ≤{criteria_details.get('criterion2_3', {}).get('consolidation_avg_adr', 0):.1f}% consolidation ADR)
+   • Price Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('price_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('price_difference_adr', 0):.1f}% difference (need ≤{criteria_details.get('criterion2_3', {}).get('stability_threshold', 0):.1f}% 20-day ADR)
    • Weighted Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('stability_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('weighted_stability', 0):.2f} (need ≤2.5) - Penalizes extreme outlier candles
 
 4. PRICE ABOVE 50 SMA:
@@ -2345,19 +2351,22 @@ async def get_result(result_id: str):
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move_end_idx: int) -> tuple[bool, dict]:
+def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move_end_idx: int, adr_20: float = None) -> tuple[bool, dict]:
     """
-    Enhanced consolidation pattern detection with weighted outlier analysis based on 4 criteria:
+    Enhanced consolidation pattern detection with rolling validation and strict requirements:
     1. Number of candles in consolidation >= 3
-    2. Average volume during consolidation < average volume during move up
-    3. Average daily range during consolidation < average daily range during move up (FIXED to use consolidation period ADR)
-    4. Most recent candle is at most 1 ADR away from first consolidation candle
-    5. Weighted stability calculation to penalize outlier candles
+    2. First candle of consolidation must be 1 ADR away from ADR of start of move
+    3. Rolling check: if consolidation passes then fails, it cannot become a pass again (no re-pass due to averaging)
+    4. Average volume during consolidation < average volume during move up
+    5. Average daily range during consolidation < average daily range during move up
+    6. Most recent candle is at most 1 ADR away from first consolidation candle
+    7. Consolidation starts immediately after end of move (one candle after)
     
     Args:
         df: DataFrame with OHLCV data
         move_start_idx: Start index of the move up period
         move_end_idx: End index of the move up period
+        adr_20: 20-day ADR for price stability comparison
     
     Returns:
         tuple: (consolidation_found, consolidation_details)
@@ -2365,7 +2374,7 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     if move_start_idx == -1 or move_end_idx == -1:
         return False, {}
     
-    # Consolidation period starts after the move up ends
+    # Consolidation period starts immediately after the move up ends (one candle after)
     consolidation_start_idx = move_end_idx + 1
     
     # Check if we have enough data for consolidation
@@ -2387,50 +2396,120 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     # Get move up period data
     move_data = df.iloc[move_start_idx:move_end_idx + 1]
     
+    # Calculate ADR for the move start (for first candle validation)
+    move_start_adr = ((df.iloc[move_start_idx]['High'] - df.iloc[move_start_idx]['Low']) / df.iloc[move_start_idx]['Open']) * 100
+    
+    # Criterion 2: First candle of consolidation should be 1 ADR away from ADR of start of move
+    first_consolidation_adr = ((consolidation_data.iloc[0]['High'] - consolidation_data.iloc[0]['Low']) / consolidation_data.iloc[0]['Open']) * 100
+    first_candle_criterion_met = abs(first_consolidation_adr - move_start_adr) <= (adr_20 if adr_20 is not None else 5.0)
+    
     # Calculate ADR for the move up period
     move_daily_ranges = (move_data['High'] - move_data['Low']) / move_data['Open'] * 100
     move_avg_adr = move_daily_ranges.mean()
     
-    # FIXED: Calculate consolidation ADR using correct formula over consolidation period only
-    # Consolidation_ADR = average( abs(high - low) / close ) over consolidation_candles
-    consolidation_daily_ranges = abs(consolidation_data['High'] - consolidation_data['Low']) / consolidation_data['Close'] * 100
-    consolidation_avg_adr = consolidation_daily_ranges.mean()
-    
-    # ENHANCEMENT: Calculate weighted stability to penalize outlier candles
-    # Weighted_Stability = Σ( (candle_range / avg_range)² ) / total_candles
-    if consolidation_avg_adr > 0:
-        weighted_stability_sum = sum((candle_range / consolidation_avg_adr) ** 2 for candle_range in consolidation_daily_ranges)
-        weighted_stability = weighted_stability_sum / consolidation_candles
+    # Calculate consolidation ADR starting from SECOND candle of consolidation (excluding first candle)
+    # First candle of consolidation should NOT be included in ADR calculation
+    if len(consolidation_data) > 1:
+        consolidation_adr_data = consolidation_data.iloc[1:]  # Skip first consolidation candle
+        consolidation_daily_ranges = abs(consolidation_adr_data['High'] - consolidation_adr_data['Low']) / consolidation_adr_data['Close'] * 100
     else:
-        weighted_stability = 0
+        consolidation_daily_ranges = pd.Series([])  # Empty series if only 1 candle
     
-    # Criterion 2: Average volume during consolidation < average volume during move up
-    move_avg_volume = move_data['Volume'].mean()
+    # Criterion 3: Rolling check - if consolidation passes then fails, it cannot become a pass again
+    # Check each progressive period to ensure no pass->fail->pass pattern
+    # ADR calculation excludes first consolidation candle for all periods
+    rolling_validation_passed = True
+    rolling_details = []
+    
+    for period_end in range(3, len(consolidation_data) + 1):  # Start checking from 3 candles
+        period_data = consolidation_data.iloc[:period_end]
+        # Exclude first candle from ADR calculation for this period too
+        if len(period_data) > 1:
+            period_adr_data = period_data.iloc[1:]  # Skip first candle
+            period_adr = abs(period_adr_data['High'] - period_adr_data['Low']) / period_adr_data['Close'] * 100
+            period_avg_adr = period_adr.mean()
+        else:
+            period_avg_adr = 0  # If only first candle, no ADR to calculate
+        
+        # Check if this period would pass the ADR criterion
+        period_passes_adr = period_avg_adr < move_avg_adr
+        
+        # Check volume criterion for this period
+        period_avg_volume = period_data['Volume'].mean()
+        move_avg_volume = move_data['Volume'].mean()
+        period_passes_volume = period_avg_volume < move_avg_volume
+        
+        # Overall period pass/fail
+        period_passes = period_passes_adr and period_passes_volume
+        
+        rolling_details.append({
+            'period_end': period_end,
+            'period_passes': period_passes,
+            'period_adr': round(period_avg_adr, 2),
+            'period_volume': round(period_avg_volume, 0)
+        })
+        
+        # Check for pass->fail pattern in sequence
+        if len(rolling_details) >= 2:
+            prev_passed = rolling_details[-2]['period_passes']
+            curr_passed = rolling_details[-1]['period_passes']
+            
+            # If we had a pass->fail transition, check if we pass again later
+            if prev_passed and not curr_passed:
+                # Mark that we've had a failure after a pass
+                for future_end in range(period_end + 1, len(consolidation_data) + 1):
+                    future_data = consolidation_data.iloc[:future_end]
+                    # Exclude first candle from future ADR calculation too
+                    if len(future_data) > 1:
+                        future_adr_data = future_data.iloc[1:]  # Skip first candle
+                        future_adr = abs(future_adr_data['High'] - future_adr_data['Low']) / future_adr_data['Close'] * 100
+                        future_avg_adr = future_adr.mean()
+                    else:
+                        future_avg_adr = 0
+                    future_avg_volume = future_data['Volume'].mean()
+                    
+                    future_passes_adr = future_avg_adr < move_avg_adr
+                    future_passes_volume = future_avg_volume < move_avg_volume
+                    future_passes = future_passes_adr and future_passes_volume
+                    
+                    if future_passes:
+                        # Found a re-pass after fail - invalidate
+                        rolling_validation_passed = False
+                        break
+                
+                if not rolling_validation_passed:
+                    break
+    
+    # Calculate final consolidation metrics
+    # ADR excludes first consolidation candle, volume includes all consolidation candles
+    consolidation_avg_adr = consolidation_daily_ranges.mean() if len(consolidation_daily_ranges) > 0 else 0
     consolidation_avg_volume = consolidation_data['Volume'].mean()
+    move_avg_volume = move_data['Volume'].mean()
+    
+    # Criterion 4: Average volume during consolidation < average volume during move up
     volume_criterion_met = consolidation_avg_volume < move_avg_volume
     
-    # Criterion 3: Average daily range during consolidation < average daily range during move up
+    # Criterion 5: Average daily range during consolidation < average daily range during move up
     range_criterion_met = consolidation_avg_adr < move_avg_adr
     
-    # Criterion 4: Most recent candle close is at most 1 ADR away from first consolidation candle close
-    # Use the consolidation period ADR for consistency
+    # Criterion 6: Most recent candle close is at most 1 ADR away from first consolidation candle close
     first_consolidation_close = consolidation_data.iloc[0]['Close']
     most_recent_close = consolidation_data.iloc[-1]['Close']
     price_difference = abs(most_recent_close - first_consolidation_close)
     price_difference_adr = price_difference / first_consolidation_close * 100
-    price_criterion_met = price_difference_adr <= consolidation_avg_adr
     
-    # Enhanced criterion: Weighted stability should be reasonable (not too many extreme outliers)
-    # A value close to 1.0 indicates normal distribution, higher values indicate more outliers
-    stability_criterion_met = weighted_stability <= 2.5  # Allow some outliers but penalize excessive volatility
+    # Use 20-day ADR if provided, otherwise fallback to consolidation ADR
+    stability_threshold = adr_20 if adr_20 is not None else consolidation_avg_adr
+    price_criterion_met = price_difference_adr <= stability_threshold
     
     # All criteria must be met
     consolidation_found = (
         consolidation_candles >= 3 and
+        first_candle_criterion_met and
+        rolling_validation_passed and
         volume_criterion_met and
         range_criterion_met and
-        price_criterion_met and
-        stability_criterion_met
+        price_criterion_met
     )
     
     consolidation_details = {
@@ -2438,6 +2517,11 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         'consolidation_candles': consolidation_candles,
         'consolidation_start_idx': consolidation_start_idx,
         'consolidation_end_idx': len(df) - 1,
+        'first_candle_criterion_met': first_candle_criterion_met,
+        'first_consolidation_adr': round(first_consolidation_adr, 2),
+        'move_start_adr': round(move_start_adr, 2),
+        'rolling_validation_passed': rolling_validation_passed,
+        'rolling_details': rolling_details,
         'move_avg_volume': round(move_avg_volume, 0),
         'consolidation_avg_volume': round(consolidation_avg_volume, 0),
         'volume_criterion_met': volume_criterion_met,
@@ -2446,11 +2530,11 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         'range_criterion_met': range_criterion_met,
         'price_difference_adr': round(price_difference_adr, 2),
         'price_criterion_met': price_criterion_met,
+        'stability_threshold': round(stability_threshold, 2),
+        'adr_20_used': adr_20 is not None,
         'first_consolidation_close': round(first_consolidation_close, 2),
         'most_recent_close': round(most_recent_close, 2),
-        'weighted_stability': round(weighted_stability, 2),
-        'stability_criterion_met': stability_criterion_met,
-        'description': f"Consolidation: {consolidation_candles} days, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}%, close diff {price_difference_adr:.1f}% (≤{consolidation_avg_adr:.1f}%), stability {weighted_stability:.2f} (≤2.5)"
+        'description': f"Enhanced Consolidation: {consolidation_candles} days, first candle ADR {first_consolidation_adr:.1f}% vs move start {move_start_adr:.1f}%, rolling validation {'PASSED' if rolling_validation_passed else 'FAILED'}, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}% (excluding first candle), close diff {price_difference_adr:.1f}% (≤{stability_threshold:.1f}%)"
     }
     
     return consolidation_found, consolidation_details
