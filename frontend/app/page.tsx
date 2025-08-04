@@ -42,7 +42,7 @@ export default function Home() {
     setError('')
     
     try {
-      const response = await fetch(`http://localhost:8002/ticker/${tickerSymbol.toUpperCase()}?range=${range}`)
+              const response = await fetch(`http://localhost:8000/ticker/${tickerSymbol.toUpperCase()}?range=${range}`)
       if (!response.ok) {
         const errorData = await response.json()
         throw new Error(errorData.detail || 'Failed to fetch ticker data')

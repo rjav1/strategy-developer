@@ -98,6 +98,11 @@ class TickerData(BaseModel):
     opens: List[float]
     volumes: List[int]
 
+class BacktestRequest(BaseModel):
+    ticker: str
+    period: str = "1y"
+    initial_capital: float = 10000.0
+
 class StrategyMetadata(BaseModel):
     name: str
     type: str  # "single_asset" or "screened_multi"
@@ -2350,6 +2355,235 @@ async def get_result(result_id: str):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+def make_json_serializable(obj):
+    """Convert non-JSON-serializable objects to JSON-safe formats"""
+    import json
+    import numpy as np
+    import pandas as pd
+    from datetime import datetime, date
+    
+    if isinstance(obj, dict):
+        return {key: make_json_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [make_json_serializable(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return [make_json_serializable(item) for item in obj]
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    elif pd.isna(obj):
+        return None
+    elif hasattr(obj, '__dict__'):
+        # Handle objects with __dict__ by converting to dict
+        return make_json_serializable(obj.__dict__)
+    elif hasattr(obj, 'item'):
+        # Handle numpy scalars that have .item() method
+        return make_json_serializable(obj.item())
+    else:
+        return obj
+
+
+# Enhanced Momentum Backtest endpoint
+@app.post("/backtest/momentum")
+async def run_momentum_backtest(request: BacktestRequest):
+    """
+    Run enhanced momentum screener backtest for a specific ticker
+    
+    Returns comprehensive backtest results including performance metrics,
+    trade log, chart data, highlighting periods, and animation frames.
+    """
+    try:
+        # Import the enhanced backtester
+        from enhanced_backtest_strategy import EnhancedMomentumBacktester
+        
+        # Extract parameters from request
+        ticker = request.ticker.upper()
+        period = request.period
+        initial_capital = request.initial_capital
+        
+        print(f"🚀 Starting enhanced backtest for {ticker}")
+        
+        # Initialize and run backtest
+        backtester = EnhancedMomentumBacktester(
+            ticker=ticker,
+            period=period,
+            initial_capital=initial_capital
+        )
+        
+        # Fetch data
+        if not backtester.fetch_data():
+            raise HTTPException(status_code=404, detail=f"Could not fetch data for ticker '{ticker}'")
+        
+        # Run simulation
+        if not backtester.run_simulation():
+            raise HTTPException(status_code=500, detail=f"Simulation failed for ticker '{ticker}'")
+        
+        # Generate comprehensive results
+        results = backtester.generate_results()
+        
+        if not results["success"]:
+            raise HTTPException(status_code=500, detail=results.get("error", f"Backtest failed for '{ticker}'"))
+        
+        # Convert all data to JSON-serializable format
+        results = make_json_serializable(results)
+        
+        # Extract and format results for frontend with error handling
+        metrics = results.get("results", {})
+        trades = results.get("trades", [])
+        price_data = results.get("price_data", [])
+        momentum_periods = results.get("momentum_periods", [])
+        market_events = results.get("market_events", [])
+        
+        # Create buy/sell signals from market events for frontend compatibility
+        buy_signals = []
+        sell_signals = []
+        
+        try:
+            if market_events and isinstance(market_events, list):
+                buy_signals = [
+                    {"date": str(event.get("date", "")), "price": float(event.get("price", 0))}
+                    for event in market_events 
+                    if isinstance(event, dict) and event.get("event_type") == "buy"
+                ]
+                sell_signals = [
+                    {"date": str(event.get("date", "")), "price": float(event.get("price", 0))}
+                    for event in market_events 
+                    if isinstance(event, dict) and event.get("event_type") == "sell"
+                ]
+        except Exception as e:
+            print(f"⚠️ Warning: Error processing market events: {e}")
+            buy_signals = []
+            sell_signals = []
+        
+        # Safely extract numeric values and convert to Python types
+        def safe_extract(value, default=0):
+            if pd.isna(value) or value is None:
+                return default
+            if hasattr(value, 'item'):
+                return value.item()
+            return float(value) if isinstance(value, (int, float)) else default
+
+        response_data = {
+            "success": True,
+            "results": {
+                "total_trades": int(safe_extract(metrics.get("total_trades", 0))),
+                "winning_trades": int(safe_extract(metrics.get("winning_trades", 0))),
+                "losing_trades": int(safe_extract(metrics.get("losing_trades", 0))),
+                "win_rate": round(safe_extract(metrics.get("win_rate", 0)), 1),
+                "total_pnl": round(safe_extract(metrics.get("total_pnl", 0)), 2),
+                "total_return_pct": round(safe_extract(metrics.get("total_return_pct", 0)), 2),
+                "avg_win": round(safe_extract(metrics.get("avg_win", 0)), 2),
+                "avg_loss": round(abs(safe_extract(metrics.get("avg_loss", 0))), 2),
+                "max_drawdown": round(safe_extract(metrics.get("max_drawdown", 0)), 2),
+                "sharpe_ratio": round(safe_extract(metrics.get("sharpe_ratio", 0)), 2),
+                "profit_factor": round(safe_extract(metrics.get("profit_factor", 0)), 2)
+            },
+            "trades": make_json_serializable(trades) if trades else [],
+            "price_data": make_json_serializable(price_data) if price_data else [],
+            "momentum_periods": make_json_serializable(momentum_periods) if momentum_periods else [],
+            "buy_signals": buy_signals,
+            "sell_signals": sell_signals,
+            "market_events": make_json_serializable(market_events) if market_events else [],
+            "ticker": str(ticker),
+            "period": str(period),
+            "initial_capital": float(initial_capital),
+            "chart_path": str(results.get("chart_path", ""))
+        }
+        
+        # Backtest completed successfully
+        
+        return response_data
+        
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail="Enhanced backtesting module not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running enhanced backtest: {str(e)}")
+
+# Streaming backtest endpoint for live animation
+@app.post("/backtest/momentum/stream")
+async def stream_momentum_backtest(request: BacktestRequest):
+    """
+    Stream momentum screener backtest frames for live animation
+    
+    Returns Server-Sent Events (SSE) stream of backtest frames.
+    """
+    from fastapi.responses import StreamingResponse
+    import asyncio
+    
+    async def generate_frames():
+        try:
+            # Import the enhanced backtester
+            from enhanced_backtest_strategy import EnhancedMomentumBacktester
+            
+            # Extract parameters
+            ticker = request.ticker.upper()
+            period = request.period
+            initial_capital = request.initial_capital
+            
+            # Initialize backtester
+            backtester = EnhancedMomentumBacktester(
+                ticker=ticker,
+                period=period,
+                initial_capital=initial_capital
+            )
+            
+            # Fetch data
+            if not backtester.fetch_data():
+                yield f"data: {json.dumps({'error': f'Could not fetch data for {ticker}'})}\n\n"
+                return
+            
+            # Send initial status
+            yield f"data: {json.dumps({'type': 'start', 'ticker': ticker, 'total_days': len(backtester.daily_data)})}\n\n"
+            
+            # Run simulation and stream frames
+            if backtester.run_simulation():
+                frames = backtester.backtest_frames
+                
+                for i, frame in enumerate(frames):
+                    frame_data = {
+                        'type': 'frame',
+                        'frame_index': i,
+                        'total_frames': len(frames),
+                        'progress': (i / len(frames)) * 100,
+                        'data': frame.to_dict()
+                    }
+                    
+                    yield f"data: {json.dumps(frame_data)}\n\n"
+                    
+                    # Add small delay for animation effect
+                    await asyncio.sleep(0.1)
+                
+                # Send final results
+                results = backtester.generate_results()
+                final_data = {
+                    'type': 'complete',
+                    'results': results
+                }
+                yield f"data: {json.dumps(final_data)}\n\n"
+            
+            else:
+                yield f"data: {json.dumps({'error': 'Simulation failed'})}\n\n"
+                
+        except Exception as e:
+            yield f"data: {json.dumps({'error': f'Streaming error: {str(e)}'})}\n\n"
+    
+    return StreamingResponse(
+        generate_frames(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream"
+        }
+    )
 
 def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move_end_idx: int, adr_20: float = None) -> tuple[bool, dict]:
     """

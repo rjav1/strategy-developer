@@ -120,7 +120,7 @@ export default function Analytics() {
     setAnalysisResult(null)
     
     try {
-      const response = await fetch(`http://localhost:8002/analyze/momentum_pattern/${targetSymbol.toUpperCase()}?period=${period}`)
+              const response = await fetch(`http://localhost:8000/analyze/momentum_pattern/${targetSymbol.toUpperCase()}?period=${period}`)
       
       if (!response.ok) {
         const errorData = await response.json()

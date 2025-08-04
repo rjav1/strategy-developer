@@ -45,10 +45,18 @@ function createWindow() {
   console.log('Development mode:', isDev);
   
   if (isDev) {
-    // Hardcode to port 3004
-    console.log('Loading from http://localhost:3000');
-    mainWindow.loadURL('http://localhost:3000');
-    mainWindow.webContents.openDevTools();
+    // Try to find the correct port dynamically
+    tryLoadPorts([3000, 3001, 3002, 3003, 3004], (url) => {
+      if (url) {
+        console.log('Loading from', url);
+        mainWindow.loadURL(url);
+        mainWindow.webContents.openDevTools();
+      } else {
+        console.log('No frontend found, loading from http://localhost:3000');
+        mainWindow.loadURL('http://localhost:3000');
+        mainWindow.webContents.openDevTools();
+      }
+    });
   } else {
     console.log('Loading from built files');
     mainWindow.loadFile(path.join(__dirname, '../frontend/dist/index.html'));

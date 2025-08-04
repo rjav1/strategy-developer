@@ -226,7 +226,7 @@ export default function Screeners() {
         }
 
         // Use streaming endpoint for real-time progress
-        const response = await fetch('http://localhost:8002/screen_momentum_stream', {
+        const response = await fetch('http://localhost:8000/screen_momentum_stream', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -317,7 +317,7 @@ export default function Screeners() {
           queryParams.append('symbols', customSymbols.trim())
         }
 
-        const response = await fetch(`http://localhost:8002/screen/low_volatility?${queryParams}`)
+        const response = await fetch(`http://localhost:8000/screen/low_volatility?${queryParams}`)
         
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`)
@@ -395,7 +395,7 @@ export default function Screeners() {
 
   const fetchStockData = async (symbol: string) => {
     try {
-      const response = await fetch(`http://localhost:8002/ticker/${symbol}?range=3m`)
+              const response = await fetch(`http://localhost:8000/ticker/${symbol}?range=3m`)
       if (response.ok) {
         const data = await response.json()
         setSelectedStock(data)
@@ -411,7 +411,7 @@ export default function Screeners() {
     setShowMomentumModal(true)
     
     try {
-      const response = await fetch(`http://localhost:8002/analyze/momentum_pattern/${symbol}?period=1y`)
+              const response = await fetch(`http://localhost:8000/analyze/momentum_pattern/${symbol}?period=1y`)
       
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
