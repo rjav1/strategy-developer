@@ -85,7 +85,7 @@ export default function BacktestEngine() {
     const fetchStrategies = async () => {
       setLoadingStrategies(true)
       try {
-        const response = await fetch('http://localhost:8002/strategies')
+        const response = await fetch('http://localhost:8000/strategies')
         if (response.ok) {
           const strategiesData = await response.json()
           // Add momentum screener as built-in strategy
@@ -134,7 +134,7 @@ export default function BacktestEngine() {
         })
       }, 2000)
 
-      const response = await fetch('http://localhost:8002/backtest/momentum', {
+      const response = await fetch('http://localhost:8000/backtest/momentum', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -173,7 +173,7 @@ export default function BacktestEngine() {
         if (error.name === 'AbortError') {
           errorMessage = 'Backtest timed out after 60 seconds. This may happen with complex calculations. Please try again or consider using a shorter time period.'
         } else if (error.message.includes('Failed to fetch')) {
-          errorMessage = 'Unable to connect to the backend server. Please ensure the backend is running on http://localhost:8002'
+          errorMessage = 'Unable to connect to the backend server. Please ensure the backend is running on http://localhost:8000'
         } else {
           errorMessage = error.message
         }

@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import LiveReplayChart from './LiveReplayChart'
+import EnhancedBacktestChart from './EnhancedBacktestChart'
 
 interface Trade {
   entry_date: string
@@ -10,6 +10,7 @@ interface Trade {
   exit_price?: number
   pnl?: number
   status: 'open' | 'closed'
+  trade_number?: number
 }
 
 interface MomentumPeriod {
@@ -28,6 +29,9 @@ interface BacktestChartProps {
     low: number
     open: number
     volume: number
+    trading_state?: 'NOT_IN_TRADE' | 'IN_PROGRESS' | 'BOUGHT'
+    momentum_strength?: number
+    atr?: number
   }>
   trades: Trade[]
   momentumPeriods: MomentumPeriod[]
@@ -42,9 +46,9 @@ export default function BacktestChart({
   ticker,
   isLoading = false 
 }: BacktestChartProps) {
-  // Simply pass through to the new LiveReplayChart component
+  // Use the new enhanced chart with Plotly for perfect alignment and interactivity
   return (
-    <LiveReplayChart
+    <EnhancedBacktestChart
       priceData={priceData}
       trades={trades}
       momentumPeriods={momentumPeriods}

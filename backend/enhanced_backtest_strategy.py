@@ -687,9 +687,13 @@ class EnhancedMomentumBacktester:
             "sharpe_ratio": self.calculate_sharpe_ratio()
         }
         
-        # Prepare data for frontend
+        # Prepare enhanced data for frontend
         price_data = []
-        for frame in self.backtest_frames:
+        for i, frame in enumerate(self.backtest_frames):
+            # Calculate momentum strength and ATR for this frame
+            momentum_strength = self._calculate_momentum_strength_for_frame(frame, i)
+            atr = self._calculate_atr_for_frame(frame, i)
+            
             price_data.append({
                 "date": frame.current_date.isoformat(),
                 "open": frame.ohlcv['open'],
@@ -697,11 +701,18 @@ class EnhancedMomentumBacktester:
                 "low": frame.ohlcv['low'],
                 "close": frame.ohlcv['close'],
                 "price": frame.ohlcv['close'],  # For frontend compatibility
-                "volume": frame.ohlcv['volume']
+                "volume": frame.ohlcv['volume'],
+                "trading_state": frame.current_state.value if hasattr(frame, 'current_state') else 'NOT_IN_TRADE',
+                "momentum_strength": momentum_strength,
+                "atr": atr
             })
         
-        # Prepare trades for frontend
-        trades_data = [trade.to_dict() for trade in self.completed_trades]
+        # Prepare trades for frontend with numbering
+        trades_data = []
+        for i, trade in enumerate(self.completed_trades, 1):
+            trade_dict = trade.to_dict()
+            trade_dict['trade_number'] = i
+            trades_data.append(trade_dict)
         
         # Prepare highlights for frontend
         highlights_data = [highlight.to_dict() for highlight in self.highlight_periods]
@@ -734,6 +745,64 @@ class EnhancedMomentumBacktester:
         
         # Annualized Sharpe ratio (assuming 252 trading days)
         return (returns_series.mean() * 252) / (returns_series.std() * np.sqrt(252))
+    
+    def _calculate_momentum_strength_for_frame(self, frame: 'BacktestFrame', frame_index: int) -> float:
+        """Calculate momentum strength (0-100) for a specific frame"""
+        try:
+            if frame_index < 10:  # Need at least 10 frames
+                return 0.0
+            
+            current_price = frame.ohlcv['close']
+            
+            # Look at 10-frame price change
+            if frame_index >= 10:
+                ten_frames_ago = self.backtest_frames[frame_index - 10]
+                ten_frames_price = ten_frames_ago.ohlcv['close']
+                price_change = (current_price - ten_frames_price) / ten_frames_price
+            else:
+                price_change = 0.0
+            
+            # Look at volume trend (5-frame average vs 20-frame average)
+            if frame_index >= 20:
+                vol_5_avg = np.mean([self.backtest_frames[i].ohlcv['volume'] for i in range(frame_index-5, frame_index)])
+                vol_20_avg = np.mean([self.backtest_frames[i].ohlcv['volume'] for i in range(frame_index-20, frame_index)])
+                volume_strength = vol_5_avg / vol_20_avg if vol_20_avg > 0 else 1.0
+            else:
+                volume_strength = 1.0
+            
+            # Combine price momentum and volume strength
+            momentum = (price_change * 100) + ((volume_strength - 1) * 20)
+            return max(0, min(100, momentum + 50))  # Normalize to 0-100
+            
+        except Exception:
+            return 0.0
+    
+    def _calculate_atr_for_frame(self, frame: 'BacktestFrame', frame_index: int) -> float:
+        """Calculate Average True Range for a specific frame"""
+        try:
+            if frame_index < 14:  # Need 14 frames for ATR
+                return 0.0
+            
+            # Calculate True Range for last 14 frames
+            tr_values = []
+            for i in range(frame_index - 13, frame_index + 1):
+                if i <= 0:
+                    continue
+                
+                current = self.backtest_frames[i]
+                previous = self.backtest_frames[i - 1]
+                
+                high_low = current.ohlcv['high'] - current.ohlcv['low']
+                high_close_prev = abs(current.ohlcv['high'] - previous.ohlcv['close'])
+                low_close_prev = abs(current.ohlcv['low'] - previous.ohlcv['close'])
+                
+                tr = max(high_low, high_close_prev, low_close_prev)
+                tr_values.append(tr)
+            
+            return sum(tr_values) / len(tr_values) if tr_values else 0.0
+            
+        except Exception:
+            return 0.0
     
     def generate_static_chart(self) -> str:
         """Generate static matplotlib chart for backend analysis"""
