@@ -2480,8 +2480,10 @@ async def run_momentum_backtest(request: BacktestRequest):
                 "win_rate": round(safe_extract(metrics.get("win_rate", 0)), 1),
                 "total_pnl": round(safe_extract(metrics.get("total_pnl", 0)), 2),
                 "total_return_pct": round(safe_extract(metrics.get("total_return_pct", 0)), 2),
+                "avg_trade_pnl": round(safe_extract(metrics.get("avg_trade_pnl", 0)), 2),
                 "avg_win": round(safe_extract(metrics.get("avg_win", 0)), 2),
                 "avg_loss": round(abs(safe_extract(metrics.get("avg_loss", 0))), 2),
+                "avg_holding_days": round(safe_extract(metrics.get("avg_holding_days", 0)), 1),
                 "max_drawdown": round(safe_extract(metrics.get("max_drawdown", 0)), 2),
                 "sharpe_ratio": round(safe_extract(metrics.get("sharpe_ratio", 0)), 2),
                 "profit_factor": round(safe_extract(metrics.get("profit_factor", 0)), 2)
@@ -2518,15 +2520,20 @@ async def stream_momentum_backtest(request: BacktestRequest):
     from fastapi.responses import StreamingResponse
     import asyncio
     
-    async def generate_frames():
+    async def generate():
         try:
             # Import the enhanced backtester
             from enhanced_backtest_strategy import EnhancedMomentumBacktester
             
-            # Extract parameters
+            # Extract parameters from request
             ticker = request.ticker.upper()
             period = request.period
             initial_capital = request.initial_capital
+            
+            print(f"🚀 Starting streaming backtest for {ticker}")
+            
+            # Send initial status
+            yield f"data: {json.dumps({'type': 'status', 'message': f'Starting backtest for {ticker}', 'progress': 0})}\n\n"
             
             # Initialize backtester
             backtester = EnhancedMomentumBacktester(
@@ -2535,55 +2542,305 @@ async def stream_momentum_backtest(request: BacktestRequest):
                 initial_capital=initial_capital
             )
             
-            # Fetch data
+            # Fetch data with progress updates
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Fetching market data...', 'progress': 10})}\n\n"
+            
             if not backtester.fetch_data():
-                yield f"data: {json.dumps({'error': f'Could not fetch data for {ticker}'})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Could not fetch data for ticker {ticker}'})}\n\n"
                 return
             
-            # Send initial status
-            yield f"data: {json.dumps({'type': 'start', 'ticker': ticker, 'total_days': len(backtester.daily_data)})}\n\n"
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Data fetched successfully', 'progress': 30})}\n\n"
             
-            # Run simulation and stream frames
-            if backtester.run_simulation():
-                frames = backtester.backtest_frames
-                
-                for i, frame in enumerate(frames):
-                    frame_data = {
-                        'type': 'frame',
-                        'frame_index': i,
-                        'total_frames': len(frames),
-                        'progress': (i / len(frames)) * 100,
-                        'data': frame.to_dict()
-                    }
-                    
-                    yield f"data: {json.dumps(frame_data)}\n\n"
-                    
-                    # Add small delay for animation effect
-                    await asyncio.sleep(0.1)
-                
-                # Send final results
-                results = backtester.generate_results()
-                final_data = {
-                    'type': 'complete',
-                    'results': results
-                }
-                yield f"data: {json.dumps(final_data)}\n\n"
+            # Run simulation with progress updates
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Running simulation...', 'progress': 40})}\n\n"
             
-            else:
-                yield f"data: {json.dumps({'error': 'Simulation failed'})}\n\n"
-                
+            if not backtester.run_simulation():
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Simulation failed for ticker {ticker}'})}\n\n"
+                return
+            
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Simulation completed', 'progress': 80})}\n\n"
+            
+            # Generate results
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Generating results...', 'progress': 90})}\n\n"
+            
+            results = backtester.generate_results()
+            
+            if not results["success"]:
+                yield f"data: {json.dumps({'type': 'error', 'message': results.get('error', f'Backtest failed for {ticker}')})}\n\n"
+                return
+            
+            # Convert results to JSON-serializable format
+            results = make_json_serializable(results)
+            
+            # Extract and format results
+            metrics = results.get("results", {})
+            trades = results.get("trades", [])
+            price_data = results.get("price_data", [])
+            momentum_periods = results.get("momentum_periods", [])
+            market_events = results.get("market_events", [])
+            
+            # Create buy/sell signals
+            buy_signals = []
+            sell_signals = []
+            
+            try:
+                if market_events and isinstance(market_events, list):
+                    buy_signals = [
+                        {"date": str(event.get("date", "")), "price": float(event.get("price", 0))}
+                        for event in market_events 
+                        if isinstance(event, dict) and event.get("event_type") == "buy"
+                    ]
+                    sell_signals = [
+                        {"date": str(event.get("date", "")), "price": float(event.get("price", 0))}
+                        for event in market_events 
+                        if isinstance(event, dict) and event.get("event_type") == "sell"
+                    ]
+            except Exception as e:
+                print(f"⚠️ Warning: Error processing market events: {e}")
+                buy_signals = []
+                sell_signals = []
+            
+            # Safely extract numeric values
+            def safe_extract(value, default=0):
+                if pd.isna(value) or value is None:
+                    return default
+                if hasattr(value, 'item'):
+                    return value.item()
+                return float(value) if isinstance(value, (int, float)) else default
+
+            response_data = {
+                "type": "complete",
+                "success": True,
+                "results": {
+                    "total_trades": int(safe_extract(metrics.get("total_trades", 0))),
+                    "winning_trades": int(safe_extract(metrics.get("winning_trades", 0))),
+                    "losing_trades": int(safe_extract(metrics.get("losing_trades", 0))),
+                    "win_rate": round(safe_extract(metrics.get("win_rate", 0)), 1),
+                    "total_pnl": round(safe_extract(metrics.get("total_pnl", 0)), 2),
+                    "total_return_pct": round(safe_extract(metrics.get("total_return_pct", 0)), 2),
+                    "avg_trade_pnl": round(safe_extract(metrics.get("avg_trade_pnl", 0)), 2),
+                    "avg_win": round(safe_extract(metrics.get("avg_win", 0)), 2),
+                    "avg_loss": round(abs(safe_extract(metrics.get("avg_loss", 0))), 2),
+                    "avg_holding_days": round(safe_extract(metrics.get("avg_holding_days", 0)), 1),
+                    "max_drawdown": round(safe_extract(metrics.get("max_drawdown", 0)), 2),
+                    "sharpe_ratio": round(safe_extract(metrics.get("sharpe_ratio", 0)), 2),
+                    "profit_factor": round(safe_extract(metrics.get("profit_factor", 0)), 2)
+                },
+                "trades": make_json_serializable(trades) if trades else [],
+                "price_data": make_json_serializable(price_data) if price_data else [],
+                "momentum_periods": make_json_serializable(momentum_periods) if momentum_periods else [],
+                "buy_signals": buy_signals,
+                "sell_signals": sell_signals,
+                "market_events": make_json_serializable(market_events) if market_events else [],
+                "ticker": str(ticker),
+                "period": str(period),
+                "initial_capital": float(initial_capital),
+                "chart_path": str(results.get("chart_path", ""))
+            }
+            
+            # Send final results
+            yield f"data: {json.dumps(response_data)}\n\n"
+            
         except Exception as e:
-            yield f"data: {json.dumps({'error': f'Streaming error: {str(e)}'})}\n\n"
+            error_message = f"Error in streaming backtest: {str(e)}"
+            print(f"❌ {error_message}")
+            yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
     
     return StreamingResponse(
-        generate_frames(),
+        generate(),
         media_type="text/plain",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "Content-Type": "text/event-stream"
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
         }
     )
+
+# Progress tracking endpoint for long-running backtests
+@app.post("/backtest/momentum/progress")
+async def start_momentum_backtest_with_progress(request: BacktestRequest):
+    """
+    Start a momentum backtest and return a job ID for progress tracking
+    """
+    import uuid
+    
+    job_id = str(uuid.uuid4())
+    
+    # Store job info
+    backtest_results[job_id] = {
+        "status": "starting",
+        "progress": 0,
+        "message": f"Starting backtest for {request.ticker}",
+        "created_at": datetime.now().isoformat(),
+        "ticker": request.ticker,
+        "period": request.period,
+        "initial_capital": request.initial_capital
+    }
+    
+    # Start backtest in background
+    asyncio.create_task(run_background_backtest(job_id, request))
+    
+    return {"job_id": job_id, "status": "started"}
+
+async def run_background_backtest(job_id: str, request: BacktestRequest):
+    """
+    Run backtest in background and update progress
+    """
+    try:
+        from enhanced_backtest_strategy import EnhancedMomentumBacktester
+        
+        ticker = request.ticker.upper()
+        period = request.period
+        initial_capital = request.initial_capital
+        
+        # Update status
+        backtest_results[job_id].update({
+            "status": "fetching_data",
+            "progress": 10,
+            "message": "Fetching market data..."
+        })
+        
+        # Initialize and fetch data
+        backtester = EnhancedMomentumBacktester(
+            ticker=ticker,
+            period=period,
+            initial_capital=initial_capital
+        )
+        
+        if not backtester.fetch_data():
+            backtest_results[job_id].update({
+                "status": "error",
+                "message": f"Could not fetch data for ticker {ticker}"
+            })
+            return
+        
+        # Update status
+        backtest_results[job_id].update({
+            "status": "running_simulation",
+            "progress": 30,
+            "message": "Running simulation..."
+        })
+        
+        # Run simulation
+        if not backtester.run_simulation():
+            backtest_results[job_id].update({
+                "status": "error",
+                "message": f"Simulation failed for ticker {ticker}"
+            })
+            return
+        
+        # Update status
+        backtest_results[job_id].update({
+            "status": "generating_results",
+            "progress": 80,
+            "message": "Generating results..."
+        })
+        
+        # Generate results
+        results = backtester.generate_results()
+        
+        if not results["success"]:
+            backtest_results[job_id].update({
+                "status": "error",
+                "message": results.get("error", f"Backtest failed for {ticker}")
+            })
+            return
+        
+        # Convert results
+        results = make_json_serializable(results)
+        
+        # Extract and format results
+        metrics = results.get("results", {})
+        trades = results.get("trades", [])
+        price_data = results.get("price_data", [])
+        momentum_periods = results.get("momentum_periods", [])
+        market_events = results.get("market_events", [])
+        
+        # Create buy/sell signals
+        buy_signals = []
+        sell_signals = []
+        
+        try:
+            if market_events and isinstance(market_events, list):
+                buy_signals = [
+                    {"date": str(event.get("date", "")), "price": float(event.get("price", 0))}
+                    for event in market_events 
+                    if isinstance(event, dict) and event.get("event_type") == "buy"
+                ]
+                sell_signals = [
+                    {"date": str(event.get("date", "")), "price": float(event.get("price", 0))}
+                    for event in market_events 
+                    if isinstance(event, dict) and event.get("event_type") == "sell"
+                ]
+        except Exception as e:
+            print(f"⚠️ Warning: Error processing market events: {e}")
+            buy_signals = []
+            sell_signals = []
+        
+        # Safely extract numeric values
+        def safe_extract(value, default=0):
+            if pd.isna(value) or value is None:
+                return default
+            if hasattr(value, 'item'):
+                return value.item()
+            return float(value) if isinstance(value, (int, float)) else default
+
+        response_data = {
+            "success": True,
+            "results": {
+                "total_trades": int(safe_extract(metrics.get("total_trades", 0))),
+                "winning_trades": int(safe_extract(metrics.get("winning_trades", 0))),
+                "losing_trades": int(safe_extract(metrics.get("losing_trades", 0))),
+                "win_rate": round(safe_extract(metrics.get("win_rate", 0)), 1),
+                "total_pnl": round(safe_extract(metrics.get("total_pnl", 0)), 2),
+                "total_return_pct": round(safe_extract(metrics.get("total_return_pct", 0)), 2),
+                "avg_trade_pnl": round(safe_extract(metrics.get("avg_trade_pnl", 0)), 2),
+                "avg_win": round(safe_extract(metrics.get("avg_win", 0)), 2),
+                "avg_loss": round(abs(safe_extract(metrics.get("avg_loss", 0))), 2),
+                "avg_holding_days": round(safe_extract(metrics.get("avg_holding_days", 0)), 1),
+                "max_drawdown": round(safe_extract(metrics.get("max_drawdown", 0)), 2),
+                "sharpe_ratio": round(safe_extract(metrics.get("sharpe_ratio", 0)), 2),
+                "profit_factor": round(safe_extract(metrics.get("profit_factor", 0)), 2)
+            },
+            "trades": make_json_serializable(trades) if trades else [],
+            "price_data": make_json_serializable(price_data) if price_data else [],
+            "momentum_periods": make_json_serializable(momentum_periods) if momentum_periods else [],
+            "buy_signals": buy_signals,
+            "sell_signals": sell_signals,
+            "market_events": make_json_serializable(market_events) if market_events else [],
+            "ticker": str(ticker),
+            "period": str(period),
+            "initial_capital": float(initial_capital),
+            "chart_path": str(results.get("chart_path", ""))
+        }
+        
+        # Update final status
+        backtest_results[job_id].update({
+            "status": "completed",
+            "progress": 100,
+            "message": "Backtest completed successfully",
+            "results": response_data,
+            "completed_at": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        error_message = f"Error in background backtest: {str(e)}"
+        print(f"❌ {error_message}")
+        backtest_results[job_id].update({
+            "status": "error",
+            "message": error_message
+        })
+
+@app.get("/backtest/progress/{job_id}")
+async def get_backtest_progress(job_id: str):
+    """
+    Get progress of a background backtest job
+    """
+    if job_id not in backtest_results:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return backtest_results[job_id]
 
 def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move_end_idx: int, adr_20: float = None) -> tuple[bool, dict]:
     """

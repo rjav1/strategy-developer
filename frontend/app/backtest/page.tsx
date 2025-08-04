@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Play, Settings, BarChart3, Clock, Target, Bookmark, Plus, X, TrendingUp, Download, RefreshCw } from 'lucide-react'
 import BacktestChart from '../../components/BacktestChart'
 import BacktestResults from '../../components/BacktestResults'
@@ -51,6 +51,22 @@ export default function BacktestEngine() {
   const [commission, setCommission] = useState(0.01)
   const [period, setPeriod] = useState('1y')
   const [selectedTickerForBacktest, setSelectedTickerForBacktest] = useState('')
+
+  // Cleanup refs for intervals and timeouts
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const maxTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Cleanup effect
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current)
+      }
+      if (maxTimeoutRef.current) {
+        clearTimeout(maxTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const datasets = [
     { id: '1', name: 'AAPL Historical Data' },
@@ -122,19 +138,8 @@ export default function BacktestEngine() {
     setBacktestResult(null)
 
     try {
-      // Create AbortController for request timeout management
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 60000) // 60 second timeout
-
-      // Simulate progress for long-running backtest
-      const progressInterval = setInterval(() => {
-        setProgress(prev => {
-          if (prev < 90) return prev + 5
-          return prev
-        })
-      }, 2000)
-
-      const response = await fetch('http://localhost:8000/backtest/momentum', {
+      // Start backtest with progress tracking
+      const startResponse = await fetch('http://localhost:8000/backtest/momentum/progress', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -143,36 +148,76 @@ export default function BacktestEngine() {
           ticker,
           period,
           initial_capital: initialCapital
-        }),
-        signal: controller.signal
+        })
       })
 
-      clearTimeout(timeoutId)
-      clearInterval(progressInterval)
-
-      if (!response.ok) {
-        let errorMessage = `HTTP error! status: ${response.status}`
-        try {
-          const errorData = await response.json()
-          errorMessage = errorData.detail || errorMessage
-        } catch {
-          // If we can't parse the error response, use the default message
-        }
-        throw new Error(errorMessage)
+      if (!startResponse.ok) {
+        throw new Error(`Failed to start backtest: ${startResponse.status}`)
       }
 
-      const result = await response.json()
-      setBacktestResult(result)
-      setSelectedTickerForBacktest(ticker)
+      const { job_id } = await startResponse.json()
+      
+      // Poll for progress updates
+      progressIntervalRef.current = setInterval(async () => {
+        try {
+          const progressResponse = await fetch(`http://localhost:8000/backtest/progress/${job_id}`)
+          
+          if (progressResponse.ok) {
+            const progressData = await progressResponse.json()
+            
+            // Update progress
+            setProgress(progressData.progress || 0)
+            
+            // Update current ticker message
+            if (progressData.message) {
+              setCurrentTicker(`${ticker} - ${progressData.message}`)
+            }
+            
+            // Check if completed
+            if (progressData.status === 'completed' && progressData.results) {
+              if (progressIntervalRef.current) {
+                clearInterval(progressIntervalRef.current)
+                progressIntervalRef.current = null
+              }
+              setBacktestResult(progressData.results)
+              setSelectedTickerForBacktest(ticker)
+              setProgress(100)
+              setIsRunning(false)
+            }
+            
+            // Check if error
+            if (progressData.status === 'error') {
+              if (progressIntervalRef.current) {
+                clearInterval(progressIntervalRef.current)
+                progressIntervalRef.current = null
+              }
+              throw new Error(progressData.message || 'Backtest failed')
+            }
+          }
+        } catch (error) {
+          console.error('Progress check failed:', error)
+        }
+      }, 2000) // Check every 2 seconds
+
+      // Set a maximum timeout of 10 minutes for very long backtests
+      maxTimeoutRef.current = setTimeout(() => {
+        if (progressIntervalRef.current) {
+          clearInterval(progressIntervalRef.current)
+          progressIntervalRef.current = null
+        }
+        setIsRunning(false)
+        setBacktestResult({
+          success: false,
+          error: 'Backtest is taking longer than expected. Please check the console for progress or try a shorter time period.'
+        })
+      }, 600000) // 10 minutes
       
     } catch (error) {
       console.error('Backtest failed:', error)
       
       let errorMessage = 'Unknown error occurred'
       if (error instanceof Error) {
-        if (error.name === 'AbortError') {
-          errorMessage = 'Backtest timed out after 60 seconds. This may happen with complex calculations. Please try again or consider using a shorter time period.'
-        } else if (error.message.includes('Failed to fetch')) {
+        if (error.message.includes('Failed to fetch')) {
           errorMessage = 'Unable to connect to the backend server. Please ensure the backend is running on http://localhost:8000'
         } else {
           errorMessage = error.message
@@ -183,7 +228,6 @@ export default function BacktestEngine() {
         success: false,
         error: errorMessage
       })
-    } finally {
       setIsRunning(false)
       setProgress(100)
     }
