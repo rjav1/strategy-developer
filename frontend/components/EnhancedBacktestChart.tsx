@@ -32,7 +32,8 @@ interface PriceDataPoint {
   low: number
   open: number
   volume: number
-  trading_state?: 'NOT_IN_TRADE' | 'IN_PROGRESS' | 'BOUGHT'
+  trading_state?: 'NOT_IN_TRADE' | 'MOMENTUM_DETECTED' | 'CONSOLIDATION' | 'IN_POSITION'
+  sma_20?: number
   momentum_strength?: number
   atr?: number
 }
@@ -45,31 +46,18 @@ interface EnhancedBacktestChartProps {
   isLoading?: boolean
 }
 
-// Color palette for distinguishing multiple trades
-const TRADE_COLORS = [
-  '#10b981', // emerald
-  '#3b82f6', // blue  
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#8b5cf6', // violet
-  '#06b6d4', // cyan
-  '#84cc16', // lime
-  '#f97316', // orange
-]
+// Simplified color system - single colors for each state
+const TRADE_COLORS = {
+  BUY: '#10b981',   // Green for all buys
+  SELL: '#ef4444'   // Red for all sells
+}
 
-const MOMENTUM_COLORS = [
-  'rgba(16, 185, 129, 0.15)', // emerald with transparency
-  'rgba(59, 130, 246, 0.15)', // blue with transparency
-  'rgba(245, 158, 11, 0.15)', // amber with transparency
-  'rgba(139, 92, 246, 0.15)', // violet with transparency
-]
-
-const CONSOLIDATION_COLORS = [
-  'rgba(251, 191, 36, 0.15)', // yellow with transparency
-  'rgba(249, 115, 22, 0.15)', // orange with transparency
-  'rgba(168, 85, 247, 0.15)', // purple with transparency
-  'rgba(34, 197, 94, 0.15)', // green with transparency
-]
+const STATE_COLORS = {
+  MOMENTUM_DETECTED: 'rgba(239, 68, 68, 0.4)',    // Darker red background
+  CONSOLIDATION: 'rgba(251, 191, 36, 0.4)',       // Darker yellow background  
+  IN_POSITION: 'rgba(16, 185, 129, 0.4)',         // Darker green background
+  NOT_IN_TRADE: null                               // No background
+}
 
 export default function EnhancedBacktestChart({ 
   priceData, 
@@ -117,25 +105,25 @@ export default function EnhancedBacktestChart({
     }))
 
     // Create annotations for trade markers
-    const annotations = []
+    const annotations: any[] = []
     
     numberedTrades.forEach((trade) => {
-      // Buy annotation
+      // Buy annotation - always green
       const buyCandle = candleData.find(c => c.date === trade.entry_date)
       if (buyCandle) {
         annotations.push({
           x: trade.entry_date,
           y: trade.entry_price,
-          text: `▲ Buy #${trade.trade_number}`,
+          text: `▲ Buy`,
           showarrow: true,
           arrowhead: 1,
           arrowsize: 1.5,
           arrowwidth: 2,
-          arrowcolor: TRADE_COLORS[(trade.trade_number - 1) % TRADE_COLORS.length],
+          arrowcolor: TRADE_COLORS.BUY,
           ax: 0,
           ay: -40,
           bgcolor: 'rgba(0,0,0,0.8)',
-          bordercolor: TRADE_COLORS[(trade.trade_number - 1) % TRADE_COLORS.length],
+          bordercolor: TRADE_COLORS.BUY,
           borderwidth: 2,
           font: {
             color: 'white',
@@ -144,7 +132,7 @@ export default function EnhancedBacktestChart({
         })
       }
 
-      // Sell annotation
+      // Sell annotation - always red
       if (trade.exit_date && trade.exit_price) {
         const sellCandle = candleData.find(c => c.date === trade.exit_date)
         if (sellCandle) {
@@ -152,16 +140,16 @@ export default function EnhancedBacktestChart({
           annotations.push({
             x: trade.exit_date,
             y: trade.exit_price,
-            text: `▼ Sell #${trade.trade_number}${pnlText}`,
+            text: `▼ Sell${pnlText}`,
             showarrow: true,
             arrowhead: 1,
             arrowsize: 1.5,
             arrowwidth: 2,
-            arrowcolor: trade.pnl && trade.pnl >= 0 ? '#10b981' : '#ef4444',
+            arrowcolor: TRADE_COLORS.SELL,
             ax: 0,
             ay: 40,
             bgcolor: 'rgba(0,0,0,0.8)',
-            bordercolor: trade.pnl && trade.pnl >= 0 ? '#10b981' : '#ef4444',
+            bordercolor: TRADE_COLORS.SELL,
             borderwidth: 2,
             font: {
               color: 'white',
@@ -172,42 +160,55 @@ export default function EnhancedBacktestChart({
       }
     })
 
-    // Create shapes for period highlights
-    const shapes = []
+    // Create shapes for state-based background coloring
+    const shapes: any[] = []
     
-    // Group periods by type for color assignment
-    let momentumIndex = 0
-    let consolidationIndex = 0
+         // Group consecutive candles by trading state to create background rectangles
+     let currentState: string | null = null
+     let stateStartDate: string | null = null
     
-    momentumPeriods.forEach((period) => {
-      const startCandle = candleData.find(c => c.date >= period.start_date)
-      const endCandle = candleData.find(c => c.date >= period.end_date) || candleData[candleData.length - 1]
+    candleData.forEach((candle, index) => {
+      const candleState = candle.trading_state || 'NOT_IN_TRADE'
       
-      if (startCandle && endCandle) {
-        const color = period.type === 'momentum' 
-          ? MOMENTUM_COLORS[momentumIndex % MOMENTUM_COLORS.length]
-          : CONSOLIDATION_COLORS[consolidationIndex % CONSOLIDATION_COLORS.length]
+      if (candleState !== currentState) {
+        // End previous state rectangle if it exists
+        if (currentState && stateStartDate && STATE_COLORS[currentState as keyof typeof STATE_COLORS]) {
+          const prevCandle = candleData[index - 1]
+          shapes.push({
+            type: 'rect',
+            xref: 'x',
+            yref: 'paper',
+            x0: stateStartDate,
+            x1: prevCandle.date,
+            y0: 0,
+            y1: 1,
+            fillcolor: STATE_COLORS[currentState as keyof typeof STATE_COLORS],
+            opacity: 0.3,
+            line: { width: 0 },
+            layer: 'below'
+          })
+        }
         
+        // Start new state rectangle
+        currentState = candleState
+        stateStartDate = candle.date
+      }
+      
+      // Handle last candle
+      if (index === candleData.length - 1 && currentState && stateStartDate && STATE_COLORS[currentState as keyof typeof STATE_COLORS]) {
         shapes.push({
           type: 'rect',
           xref: 'x',
           yref: 'paper',
-          x0: period.start_date,
-          x1: period.end_date,
+          x0: stateStartDate,
+          x1: candle.date,
           y0: 0,
           y1: 1,
-          fillcolor: color,
+          fillcolor: STATE_COLORS[currentState as keyof typeof STATE_COLORS],
           opacity: 0.3,
-          line: {
-            color: period.type === 'momentum' ? '#10b981' : '#f59e0b',
-            width: 2,
-            dash: 'dot'
-          },
+          line: { width: 0 },
           layer: 'below'
         })
-        
-        if (period.type === 'momentum') momentumIndex++
-        else consolidationIndex++
       }
     })
 
@@ -308,12 +309,14 @@ export default function EnhancedBacktestChart({
         'Close: $%{close:.2f}<br>' +
         'Volume: %{customdata.volume:,.0f}<br>' +
         'Trading State: %{customdata.trading_state}<br>' +
+        'SMA20: $%{customdata.sma_20:.2f}<br>' +
         'Momentum Period: %{customdata.momentum_period}<br>' +
         'Consolidation Period: %{customdata.consolidation_period}<br>' +
         '%{customdata.trade_info}' +
         '<extra></extra>',
       customdata: visibleData.map(d => ({
         trading_state: d.trading_state || 'NOT_IN_TRADE',
+        sma_20: d.sma_20 || 0,
         momentum_period: d.momentum_period ? 'Yes' : 'No',
         consolidation_period: d.consolidation_period ? 'Yes' : 'No',
         volume: d.volume,
@@ -334,6 +337,22 @@ export default function EnhancedBacktestChart({
           return info
         })()
       }))
+    },
+    // 20-day SMA line (purple)
+    {
+      type: 'scatter' as const,
+      mode: 'lines' as const,
+      x: visibleData.map(d => d.date),
+      y: visibleData.map(d => d.sma_20),
+      name: '20-day SMA',
+      line: {
+        color: '#8b5cf6',  // Purple color
+        width: 2
+      },
+      hovertemplate: 
+        '<b>%{x}</b><br>' +
+        '20-day SMA: $%{y:.2f}' +
+        '<extra></extra>'
     },
     // Volume trace (subplot)
     {

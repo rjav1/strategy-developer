@@ -84,9 +84,10 @@ def fetch_ohlcv(symbol: str, period_str: str) -> pd.DataFrame:
 
 class TradingState(Enum):
     """Enhanced trading state machine states"""
-    NOT_IN_TRADE = "NOT_IN_TRADE"
-    IN_PROGRESS = "IN_PROGRESS"  # Passed screener, waiting for buy signal
-    BOUGHT = "BOUGHT"           # Holding position
+    NOT_IN_TRADE = "NOT_IN_TRADE"          # No pattern detected - no background
+    MOMENTUM_DETECTED = "MOMENTUM"          # Move up detected - red background
+    CONSOLIDATION = "CONSOLIDATION"         # Consolidation after move - yellow background  
+    IN_POSITION = "IN_POSITION"            # Holding position after breakout - green background
 
 @dataclass
 class Trade:
@@ -208,6 +209,7 @@ class EnhancedMomentumBacktester:
         self.state = TradingState.NOT_IN_TRADE
         self.current_trade: Optional[Trade] = None
         self.completed_trades: List[Trade] = []
+        self.breakout_day_low: float = 0.0  # Store breakout day low for exit calculation
         
         # Data storage
         self.daily_data: Optional[pd.DataFrame] = None
@@ -390,64 +392,89 @@ class EnhancedMomentumBacktester:
         
         return events
     
-    def check_buy_signal(self, current_date: datetime, current_row: pd.Series) -> bool:
-        """Check for buy signal when in IN_PROGRESS state"""
-        if self.state != TradingState.IN_PROGRESS:
+    def check_buy_signal(self, current_date: datetime, current_row: pd.Series, consolidation_high: float = None) -> bool:
+        """Check for buy signal when in CONSOLIDATION state - breakout above consolidation range with volume"""
+        if self.state != TradingState.CONSOLIDATION:
             return False
         
-        # Simple buy signal: breakout above previous day high with volume confirmation
-        if len(self.daily_data) < 2:
-            return False
-        
-        current_idx = self.daily_data.index.get_loc(current_date)
-        if current_idx == 0:
-            return False
-        
-        prev_high = self.daily_data.iloc[current_idx - 1]['High']
         current_high = current_row['High']
         current_volume = current_row['Volume']
-        avg_volume = self.daily_data.iloc[max(0, current_idx-20):current_idx]['Volume'].mean()
+        current_idx = self.daily_data.index.get_loc(current_date)
         
-        # Buy conditions: breakout + volume confirmation
-        breakout = current_high > prev_high
-        volume_confirmation = current_volume > avg_volume * 1.2
+        # Get consolidation high from momentum screener results (EXCLUDING current day)
+        if consolidation_high is None:
+            # Use the screener's consolidation detection to get the range, but exclude current day
+            lookback_data = self.daily_data.iloc[:current_idx]  # EXCLUDE current day
+            try:
+                # Run screener on previous day's data to get consolidation range
+                prev_date = self.daily_data.index[current_idx-1] if current_idx > 0 else current_date
+                pattern_found, criteria_details, confidence = self.run_daily_screener(prev_date, lookback_data)
+                if criteria_details and 'criterion2_3' in criteria_details:
+                    consol_details = criteria_details['criterion2_3']
+                    consol_start_idx = consol_details.get('consolidation_start_idx', -1)
+                    consol_end_idx = consol_details.get('consolidation_end_idx', -1)
+                    
+                    if consol_start_idx >= 0 and consol_end_idx >= 0:
+                        # Get consolidation data (excluding current day)
+                        consol_data = lookback_data.iloc[consol_start_idx:consol_end_idx+1]
+                        consolidation_high = consol_data['High'].max()
+                        consolidation_low = consol_data['Low'].min()
+                        print(f"🔍 Consolidation range (excluding today): {consolidation_low:.2f} - {consolidation_high:.2f}")
+            except Exception as e:
+                print(f"⚠️ Error getting consolidation high: {e}")
+                return False
+        
+        if consolidation_high is None:
+            print(f"❌ No consolidation high found for {current_date.date()}")
+            return False
+        
+        # Calculate 20-day average volume
+        avg_volume_20 = self.daily_data.iloc[max(0, current_idx-20):current_idx]['Volume'].mean()
+        
+        # Entry conditions: breakout above consolidation high + volume above 20-day average
+        breakout = current_high > consolidation_high
+        volume_confirmation = current_volume > avg_volume_20
+        
+        print(f"🎯 Buy Signal Check {current_date.date()}: High={current_high:.2f} vs Consol={consolidation_high:.2f}, Vol={current_volume:.0f} vs Avg={avg_volume_20:.0f}")
+        print(f"   Breakout: {breakout}, Volume OK: {volume_confirmation}")
         
         return breakout and volume_confirmation
     
     def check_sell_signal(self, current_date: datetime, current_row: pd.Series) -> Tuple[bool, str]:
-        """Check for sell signal when in BOUGHT state"""
-        if self.state != TradingState.BOUGHT or self.current_trade is None:
+        """Check for sell signal when in IN_POSITION state - close below breakout day low OR 20-day SMA (whichever higher)"""
+        if self.state != TradingState.IN_POSITION or self.current_trade is None:
             return False, ""
         
-        current_price = current_row['Close']
-        entry_price = self.current_trade.entry_price
-        holding_days = (current_date - self.current_trade.entry_date).days
+        current_close = current_row['Close']
         
-        # Stop loss (2% below entry)
-        if current_price <= entry_price * 0.98:
-            return True, "Stop Loss"
+        # Use stored breakout day low
+        breakout_day_low = self.breakout_day_low
         
-        # Take profit (4% above entry for 2:1 R/R)
-        if current_price >= entry_price * 1.04:
-            return True, "Take Profit"
+        # Get 20-day SMA
+        current_idx = self.daily_data.index.get_loc(current_date)
+        sma_20 = self.daily_data.iloc[current_idx]['SMA20'] if 'SMA20' in self.daily_data.columns else 0
         
-        # Time-based exit (30 days max hold)
-        if holding_days >= 30:
-            return True, "Time Exit"
+        # Exit level is the higher of: breakout day low OR 20-day SMA
+        if not pd.isna(sma_20) and sma_20 > 0:
+            exit_level = max(breakout_day_low, sma_20)
+            reason = "Below Breakout Low" if exit_level == breakout_day_low else "Below 20-day SMA"
+        else:
+            exit_level = breakout_day_low
+            reason = "Below Breakout Low"
         
-        # Momentum failure (close below 10-day SMA)
-        if 'SMA10' in self.daily_data.columns:
-            current_idx = self.daily_data.index.get_loc(current_date)
-            sma10 = self.daily_data.iloc[current_idx]['SMA10']
-            if not pd.isna(sma10) and current_price < sma10 * 0.97:  # 3% buffer
-                return True, "Momentum Failure"
+        # Sell if close below exit level
+        if current_close < exit_level:
+            return True, reason
         
         return False, ""
     
     def execute_buy(self, current_date: datetime, current_row: pd.Series) -> MarketEvent:
-        """Execute buy order"""
-        buy_price = current_row['Close']  # Use close price for execution
+        """Execute buy order at close of breakout day"""
+        buy_price = current_row['Close']  # Execute at close of breakout day
         shares = int(self.current_capital * 0.95 / buy_price)  # Use 95% of capital
+        
+        # Store breakout day low for exit calculation
+        self.breakout_day_low = current_row['Low']
         
         self.current_trade = Trade(
             entry_date=current_date,
@@ -459,7 +486,7 @@ class EnhancedMomentumBacktester:
         )
         
         self.current_capital -= shares * buy_price
-        self.state = TradingState.BOUGHT
+        self.state = TradingState.IN_POSITION
         
         event = MarketEvent(
             date=current_date,
@@ -608,29 +635,66 @@ class EnhancedMomentumBacktester:
             # Update highlights and generate market events
             daily_events = self.update_highlights_and_events(current_date, current_idx, screener_result)
             
-            # State machine logic
-            if self.state == TradingState.NOT_IN_TRADE:
-                if pattern_found and confidence > 60:  # Threshold for pattern strength
-                    self.state = TradingState.IN_PROGRESS
-                    print(f"🟡 IN_PROGRESS: Pattern detected for {self.ticker} on {current_date.date()}")
+            # Enhanced state machine logic with detailed logging
+            print(f"📊 {current_date.date()}: State={self.state.value}, Pattern={pattern_found}, Confidence={confidence:.1f}%")
             
-            elif self.state == TradingState.IN_PROGRESS:
+            if self.state == TradingState.NOT_IN_TRADE:
                 if pattern_found and confidence > 60:
-                    # Check for buy signal
+                    self.state = TradingState.MOMENTUM_DETECTED
+                    print(f"🔴 MOMENTUM_DETECTED: Pattern detected for {self.ticker} on {current_date.date()} (confidence: {confidence:.1f}%)")
+            
+            elif self.state == TradingState.MOMENTUM_DETECTED:
+                if not pattern_found or confidence < 60:
+                    # Pattern no longer valid, revert to NOT_IN_TRADE
+                    self.state = TradingState.NOT_IN_TRADE
+                    print(f"🔄 NOT_IN_TRADE: Pattern failed for {self.ticker} on {current_date.date()} (confidence: {confidence:.1f}%)")
+                else:
+                    # Check if consolidation criteria are met RIGHT NOW
+                    if criteria_details and 'criterion2_3' in criteria_details:
+                        consolidation_met = criteria_details['criterion2_3'].get('met', False)
+                        if consolidation_met:
+                            self.state = TradingState.CONSOLIDATION
+                            print(f"🟡 CONSOLIDATION: Consolidation criteria met for {self.ticker} on {current_date.date()}")
+                        else:
+                            print(f"🔴 MOMENTUM_DETECTED: Still in momentum, consolidation not yet met for {self.ticker} on {current_date.date()}")
+            
+            elif self.state == TradingState.CONSOLIDATION:
+                # Check if consolidation criteria are still met
+                consolidation_still_valid = False
+                if criteria_details and 'criterion2_3' in criteria_details:
+                    consolidation_still_valid = criteria_details['criterion2_3'].get('met', False)
+                
+                if not consolidation_still_valid or not pattern_found or confidence < 60:
+                    # Consolidation ended - check why
+                    if not pattern_found or confidence < 60:
+                        self.state = TradingState.NOT_IN_TRADE
+                        print(f"🔄 NOT_IN_TRADE: Pattern failed during consolidation for {self.ticker} on {current_date.date()}")
+                    else:
+                        # Consolidation ended but pattern still valid - check for breakout
+                        if self.check_buy_signal(current_date, current_row):
+                            buy_event = self.execute_buy(current_date, current_row)
+                            daily_events.append(buy_event)
+                            print(f"🟢 BREAKOUT BUY: Consolidation ended with breakout for {self.ticker} on {current_date.date()}")
+                        else:
+                            # Consolidation ended without breakout - back to momentum or not in trade
+                            self.state = TradingState.NOT_IN_TRADE
+                            print(f"🔄 NOT_IN_TRADE: Consolidation ended without breakout for {self.ticker} on {current_date.date()}")
+                else:
+                    # Still in consolidation - check for breakout buy signal
                     if self.check_buy_signal(current_date, current_row):
                         buy_event = self.execute_buy(current_date, current_row)
                         daily_events.append(buy_event)
-                else:
-                    # Pattern no longer valid, revert to NOT_IN_TRADE
-                    self.state = TradingState.NOT_IN_TRADE
-                    print(f"🔄 NOT_IN_TRADE: Pattern failed for {self.ticker} on {current_date.date()}")
+                        print(f"🟢 CONSOLIDATION BUY: Breakout from consolidation for {self.ticker} on {current_date.date()}")
             
-            elif self.state == TradingState.BOUGHT:
+            elif self.state == TradingState.IN_POSITION:
                 # Check for sell signal
                 should_sell, sell_reason = self.check_sell_signal(current_date, current_row)
                 if should_sell:
                     sell_event = self.execute_sell(current_date, current_row, sell_reason)
                     daily_events.append(sell_event)
+                    print(f"🔴 SELL: Position closed for {self.ticker} on {current_date.date()} - Reason: {sell_reason}")
+                else:
+                    print(f"🟢 HOLDING: Position maintained for {self.ticker} on {current_date.date()}")
             
             # Calculate daily performance
             performance_metrics = self.calculate_daily_performance(current_date, current_row['Close'])
@@ -649,7 +713,9 @@ class EnhancedMomentumBacktester:
                     'high': current_row['High'],
                     'low': current_row['Low'],
                     'close': current_row['Close'],
-                    'volume': current_row['Volume']
+                    'volume': current_row['Volume'],
+                    'trading_state': self.state.value,  # Add current state to OHLCV data
+                    'sma_20': current_row.get('SMA20', None)  # Add 20-day SMA
                 },
                 state=self.state,
                 active_highlights=active_highlights,
@@ -702,7 +768,8 @@ class EnhancedMomentumBacktester:
                 "close": frame.ohlcv['close'],
                 "price": frame.ohlcv['close'],  # For frontend compatibility
                 "volume": frame.ohlcv['volume'],
-                "trading_state": frame.current_state.value if hasattr(frame, 'current_state') else 'NOT_IN_TRADE',
+                "trading_state": frame.ohlcv.get('trading_state', 'NOT_IN_TRADE'),
+                "sma_20": frame.ohlcv.get('sma_20', None),  # Add 20-day SMA
                 "momentum_strength": momentum_strength,
                 "atr": atr
             })

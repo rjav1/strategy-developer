@@ -1,3 +1,14 @@
 {
-  "watchlists": []
+  "watchlists": [
+    {
+      "id": "d318583d",
+      "name": "new",
+      "description": "new",
+      "symbols": [
+        "AAPL"
+      ],
+      "created_at": "2025-08-04T18:29:48.483155",
+      "updated_at": "2025-08-04T18:29:52.849589"
+    }
+  ]
 }
