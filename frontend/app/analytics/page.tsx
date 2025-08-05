@@ -324,11 +324,11 @@ export default function Analytics() {
                   <TrendingUp className="h-8 w-8 text-purple-400" />
                 </div>
                 <h3 className="text-sm font-medium text-muted-foreground mb-1">Criteria Met</h3>
-                <p className="text-lg font-bold text-white">{analysisResult.total_criteria_met}/9</p>
+                <p className="text-lg font-bold text-white">{analysisResult.total_criteria_met}/6</p>
                 <div className="w-full bg-gray-700 rounded-full h-2 mt-2">
                   <div 
                     className="bg-purple-400 h-2 rounded-full" 
-                    style={{ width: `${(analysisResult.total_criteria_met / 9) * 100}%` }}
+                    style={{ width: `${(analysisResult.total_criteria_met / 6) * 100}%` }}
                   ></div>
                 </div>
               </div>
@@ -342,8 +342,8 @@ export default function Analytics() {
                   <h3 className="font-medium text-white mb-2">Quick Insights</h3>
                   <p className="text-sm text-muted-foreground leading-relaxed">
                     {analysisResult.pattern_found 
-                      ? `${analysisResult.symbol} shows a ${analysisResult.pattern_strength.toLowerCase()} momentum pattern with ${analysisResult.confidence_score.toFixed(1)}% confidence. ${analysisResult.total_criteria_met} out of 4 technical criteria are satisfied, suggesting ${analysisResult.pattern_strength === 'Strong' ? 'excellent' : analysisResult.pattern_strength === 'Moderate' ? 'good' : 'limited'} momentum potential.`
-                      : `${analysisResult.symbol} does not currently meet the 5 Star Trading Setup criteria. Only ${analysisResult.total_criteria_met} out of 4 criteria are satisfied. Consider waiting for better setup conditions or analyzing different time periods.`
+                      ? `${analysisResult.symbol} shows a ${analysisResult.pattern_strength.toLowerCase()} momentum pattern with ${analysisResult.confidence_score.toFixed(1)}% confidence. ${analysisResult.total_criteria_met} out of 6 technical criteria are satisfied, suggesting ${analysisResult.pattern_strength === 'Strong' ? 'excellent' : analysisResult.pattern_strength === 'Moderate' ? 'good' : 'limited'} momentum potential.`
+                      : `${analysisResult.symbol} does not currently meet the 5 Star Trading Setup criteria. Only ${analysisResult.total_criteria_met} out of 6 criteria are satisfied. Consider waiting for better setup conditions or analyzing different time periods.`
                     }
                   </p>
                 </div>

@@ -12,6 +12,7 @@ interface ScreenResult {
   criteria_met: Record<string, boolean>
   total_met: number
   pattern_strength: string
+  confidence_score?: number  // Optional for backward compatibility
   name?: string
 }
 
@@ -99,7 +100,7 @@ export default function Screeners() {
   const [analyzingSymbol, setAnalyzingSymbol] = useState('')
   const [customSymbols, setCustomSymbols] = useState('')
   const [minCriteria, setMinCriteria] = useState(3)
-  const [topN, setTopN] = useState(20)
+  const [topN, setTopN] = useState<number | ''>(20)
   const [period, setPeriod] = useState('6mo')
   
   // Advanced criteria parameters
@@ -115,6 +116,7 @@ export default function Screeners() {
   const [requireBothMaTrending, setRequireBothMaTrending] = useState(true)
   const [enabledCriteria, setEnabledCriteria] = useState([1,2,3,4])
   const [fallbackEnabled, setFallbackEnabled] = useState(true)
+  const [includeBadSetups, setIncludeBadSetups] = useState(false)
   const [showAdvancedControls, setShowAdvancedControls] = useState(false)
   
   // Progress tracking state
@@ -209,6 +211,7 @@ export default function Screeners() {
         
         const requestBody = {
           symbols: symbols,
+          include_bad_setups: includeBadSetups,
           criteria: {
             days_large_move: 30,
             pct_large_move: minPercentageMove / 100, // Convert percentage to decimal
@@ -310,7 +313,7 @@ export default function Screeners() {
         // Use existing volatility screening API
         let queryParams = new URLSearchParams({
           period: period,
-          top_n: topN.toString()
+          top_n: (typeof topN === 'number' ? topN : 20).toString()
         })
 
         if (customSymbols.trim()) {
@@ -436,7 +439,12 @@ export default function Screeners() {
 
   const formatValue = (result: ScreenResult, type: 'momentum' | 'volatility') => {
     if (type === 'momentum') {
-      return `${result.total_met}/4 criteria met`
+      // Fallback to criteria count if confidence_score is not available
+      if (result.confidence_score !== undefined) {
+        return `${result.confidence_score.toFixed(1)}% confidence`
+      } else {
+        return `${result.total_met}/6 criteria met`
+      }
     } else {
       // For volatility, use the value property if it exists
       const value = (result as any).value || 0
@@ -448,7 +456,7 @@ export default function Screeners() {
     switch (strength) {
       case 'Strong': return 'text-green-400'
       case 'Moderate': return 'text-yellow-400'
-      case 'Weak': return 'text-orange-400'
+      case 'Weak': return 'text-red-400'
       default: return 'text-gray-400'
     }
   }
@@ -464,9 +472,9 @@ export default function Screeners() {
     }
     
     if (type === 'momentum') {
-      return `Screened ${totalStocks} stocks using 5 Star Trading Setup criteria. Average criteria met: ${averageValue.toFixed(1)}/4. 
+      return `Screened ${totalStocks} stocks using 5 Star Trading Setup criteria. Average criteria met: ${averageValue.toFixed(1)}/6. 
       Pattern strength distribution: ${strongPatterns} Strong, ${moderatePatterns} Moderate, ${weakPatterns} Weak patterns found. 
-      Top performer: ${topPerformer.symbol} (${topPerformer.total_met}/4 criteria met, ${topPerformer.pattern_strength} pattern).`
+      Top performer: ${topPerformer.symbol} (${topPerformer.total_met}/6 criteria met, ${topPerformer.pattern_strength} pattern).`
     } else {
       return `Screened ${totalStocks} stocks for volatility. Average volatility: ${(averageValue * 100).toFixed(2)}%. 
       Lowest volatility: ${topPerformer.symbol} (${(topPerformer.value * 100).toFixed(2)}%), 
@@ -558,25 +566,25 @@ export default function Screeners() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-black p-6 space-y-8">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Advanced Momentum Screeners</h1>
-          <p className="text-muted-foreground">5 Star Trading Setup Pattern Analysis & Screening</p>
+          <h1 className="text-4xl font-bold bg-gradient-to-r from-white via-purple-200 to-blue-200 bg-clip-text text-transparent mb-3">Advanced Momentum Screeners</h1>
+          <p className="text-gray-400 text-lg">5 Star Trading Setup Pattern Analysis & Screening</p>
         </div>
-        <button className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 rounded-xl font-medium transition-all duration-200 shadow-lg hover:shadow-purple-500/25">
+        <button className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 rounded-xl font-medium transition-all duration-200 shadow-lg hover:shadow-purple-500/25 border border-purple-500/30">
           <Plus className="h-5 w-5" />
           New Screener
         </button>
       </div>
 
       {/* Advanced Controls */}
-      <div className="card-glow p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-semibold text-white">Screening Parameters</h2>
+      <div className="bg-gradient-to-br from-gray-900/80 to-gray-800/60 backdrop-blur-xl border border-white/10 rounded-2xl p-8 shadow-2xl">
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-2xl font-bold bg-gradient-to-r from-white to-gray-300 bg-clip-text text-transparent">Screening Parameters</h2>
           <button
             onClick={() => setShowAdvancedControls(!showAdvancedControls)}
-            className="flex items-center gap-2 px-3 py-2 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded-lg transition-colors"
+            className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-purple-500/20 to-blue-500/20 hover:from-purple-500/30 hover:to-blue-500/30 text-purple-400 rounded-xl transition-all duration-200 border border-purple-500/30 font-medium"
           >
             <Filter className="h-4 w-4" />
             {showAdvancedControls ? 'Hide Advanced' : 'Show Advanced'}
@@ -584,48 +592,73 @@ export default function Screeners() {
         </div>
         
         {/* Basic Controls */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">Period</label>
-            <select 
-              value={period} 
-              onChange={(e) => setPeriod(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
-            >
-              <option value="3mo">3 Months</option>
-              <option value="6mo">6 Months</option>
-              <option value="1y">1 Year</option>
-              <option value="2y">2 Years</option>
-            </select>
+            <label className="block text-sm font-semibold text-gray-300 mb-3">Period</label>
+            <div className="relative">
+              <select 
+                value={period} 
+                onChange={(e) => setPeriod(e.target.value)}
+                className="w-full h-12 px-4 pr-10 bg-gradient-to-r from-gray-800/80 to-gray-700/80 border border-gray-600/50 rounded-xl text-white font-medium focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all duration-200 backdrop-blur-sm appearance-none"
+              >
+                <option value="3mo" className="bg-gray-800 text-white">3 Months</option>
+                <option value="6mo" className="bg-gray-800 text-white">6 Months</option>
+                <option value="1y" className="bg-gray-800 text-white">1 Year</option>
+                <option value="2y" className="bg-gray-800 text-white">2 Years</option>
+              </select>
+              <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
+                <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
+            </div>
+
           </div>
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">Top Results</label>
+            <label className="block text-sm font-semibold text-gray-300 mb-3">Top Results</label>
             <input 
-              type="number" 
+              type="text" 
+              inputMode="numeric"
+              pattern="[0-9]*"
               value={topN} 
-              onChange={(e) => setTopN(parseInt(e.target.value) || 20)}
-              min="5" max="100" 
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
+              onChange={(e) => {
+                const value = e.target.value.replace(/[^0-9]/g, '')
+                if (value === '') {
+                  setTopN('')
+                } else {
+                  setTopN(parseInt(value))
+                }
+              }}
+              className="w-full h-12 px-4 bg-gradient-to-r from-gray-800/80 to-gray-700/80 border border-gray-600/50 rounded-xl text-white font-medium focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all duration-200 backdrop-blur-sm"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">Min Criteria (out of 4)</label>
+            <label className="block text-sm font-semibold text-gray-300 mb-3">Min Criteria (out of 6)</label>
             <input 
-              type="number" 
+              type="text" 
+              inputMode="numeric"
+              pattern="[0-9]*"
               value={minCriteria} 
-              onChange={(e) => setMinCriteria(parseInt(e.target.value) || 3)}
-              min="1" max="4" 
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"
+              onChange={(e) => {
+                const value = e.target.value.replace(/[^0-9]/g, '')
+                if (value === '') {
+                  setMinCriteria(3)
+                } else {
+                  const num = parseInt(value)
+                  setMinCriteria(Math.min(Math.max(num, 1), 6))
+                }
+              }}
+              className="w-full h-12 px-4 bg-gradient-to-r from-gray-800/80 to-gray-700/80 border border-gray-600/50 rounded-xl text-white font-medium focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all duration-200 backdrop-blur-sm"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">Custom Symbols (optional)</label>
+            <label className="block text-sm font-semibold text-gray-300 mb-3">Custom Symbols (optional)</label>
             <input 
               type="text" 
               value={customSymbols} 
               onChange={(e) => setCustomSymbols(e.target.value)}
               placeholder="AAPL,MSFT,GOOGL"
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm"
+              className="w-full h-12 px-4 bg-gradient-to-r from-gray-800/80 to-gray-700/80 border border-gray-600/50 rounded-xl text-white font-medium focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all duration-200 backdrop-blur-sm"
             />
           </div>
         </div>
@@ -741,6 +774,16 @@ export default function Screeners() {
                 />
                 Enable Fallback Mode (3/4 instead of 4/4 criteria)
               </label>
+              <label className="flex items-center gap-3 text-sm text-gray-300">
+                <input
+                  type="checkbox"
+                  checked={includeBadSetups}
+                  onChange={(e) => setIncludeBadSetups(e.target.checked)}
+                  className="rounded bg-gray-800 border-gray-600 text-red-500"
+                />
+                <span className="text-gray-300">Include Bad Setups</span>
+                <span className="text-xs text-gray-500">(Show stocks that don't meet criteria)</span>
+              </label>
             </div>
           </div>
         )}
@@ -821,21 +864,21 @@ export default function Screeners() {
 
       {/* Results Display */}
       {allResults.length > 0 && (
-        <div className="card-glow p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold text-white">
-              {screenerType === 'momentum' ? '5 Star Momentum Patterns' : 'Low Volatility'} Results
-            </h2>
-            <div className="flex items-center gap-4">
-              <span className="text-sm text-muted-foreground">
-                {allResults.length} total results
-              </span>
-              <div className="flex items-center gap-2">
-                <label className="text-sm text-muted-foreground">Show:</label>
+        <div className="bg-gradient-to-br from-gray-900/50 to-gray-800/30 backdrop-blur-xl border border-white/10 rounded-2xl p-8 shadow-2xl">
+          <div className="flex items-center justify-between mb-8">
+            <div>
+              <h2 className="text-2xl font-bold bg-gradient-to-r from-white to-gray-300 bg-clip-text text-transparent">
+                {screenerType === 'momentum' ? '5 Star Momentum Patterns' : 'Low Volatility'} Results
+              </h2>
+              <p className="text-gray-400 mt-1">{allResults.length} stocks found</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 bg-gray-800/50 border border-gray-700/50 rounded-lg px-3 py-2">
+                <label className="text-sm text-gray-300">Show:</label>
                 <select 
                   value={itemsPerPage} 
                   onChange={(e) => handleItemsPerPageChange(parseInt(e.target.value))}
-                  className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-sm text-white"
+                  className="bg-transparent border-none text-sm text-white focus:outline-none"
                 >
                   <option value={10}>10</option>
                   <option value={25}>25</option>
@@ -843,25 +886,25 @@ export default function Screeners() {
                   <option value={100}>100</option>
                   <option value={allResults.length}>All</option>
                 </select>
-                <span className="text-sm text-muted-foreground">per page</span>
+                <span className="text-sm text-gray-300">per page</span>
               </div>
             </div>
           </div>
 
           {/* Watchlist Actions */}
           {selectedStocks.size > 0 && (
-            <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+            <div className="mb-6 p-4 bg-gradient-to-r from-blue-500/10 to-purple-500/10 border border-blue-500/30 rounded-xl">
               <div className="flex items-center justify-between">
                 <button
                   onClick={() => setShowWatchlistModal(true)}
-                  className="flex items-center gap-2 px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors"
+                  className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-500/20 to-purple-500/20 hover:from-blue-500/30 hover:to-purple-500/30 text-blue-400 rounded-lg transition-all duration-200 font-medium border border-blue-500/30"
                 >
                   <Bookmark className="h-4 w-4" />
-                  Add to Watchlist
+                  Add to Watchlist ({selectedStocks.size})
                 </button>
                 <button
                   onClick={clearSelection}
-                  className="text-sm text-muted-foreground hover:text-white transition-colors"
+                  className="text-sm text-gray-400 hover:text-white transition-colors font-medium"
                 >
                   Clear Selection
                 </button>
@@ -870,14 +913,10 @@ export default function Screeners() {
           )}
 
           {/* Selection Controls */}
-          <div className="mb-4 flex items-center gap-4">
+          <div className="mb-6 flex items-center justify-between">
             <button
               onClick={toggleSelectAll}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${
-                allSelected
-                  ? 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30'
-                  : 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30'
-              }`}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all duration-200 bg-gradient-to-r from-purple-500/20 to-pink-500/20 text-purple-400 hover:from-purple-500/30 hover:to-pink-500/30 border border-purple-500/50 hover:border-purple-400/70"
             >
               {allSelected ? (
                 <>
@@ -892,72 +931,80 @@ export default function Screeners() {
               )}
             </button>
             {selectedStocks.size > 0 && (
-              <span className="text-sm text-muted-foreground">
+              <span className="text-sm bg-gray-800/50 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-700/50">
                 {selectedStocks.size} of {allResults.length} selected
               </span>
             )}
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="w-full border-separate border-spacing-0">
               <thead>
-                <tr className="border-b border-gray-700">
-                  <th className="text-left p-3 text-muted-foreground font-medium">
+                <tr className="">
+                  <th className="text-left p-4 text-gray-300 font-semibold text-sm uppercase tracking-wider">
                     Select
                   </th>
-                  <th className="text-left p-3 text-muted-foreground font-medium">Rank</th>
-                  <th className="text-left p-3 text-muted-foreground font-medium">Symbol</th>
-                  <th className="text-left p-3 text-muted-foreground font-medium">Company</th>
-                  <th className="text-left p-3 text-muted-foreground font-medium">
+                  <th className="text-left p-4 text-gray-300 font-semibold text-sm uppercase tracking-wider">Rank</th>
+                  <th className="text-left p-4 text-gray-300 font-semibold text-sm uppercase tracking-wider">Symbol</th>
+                  <th className="text-left p-4 text-gray-300 font-semibold text-sm uppercase tracking-wider">Company</th>
+                  <th className="text-left p-4 text-gray-300 font-semibold text-sm uppercase tracking-wider">
                     {screenerType === 'momentum' ? 'Confidence' : 'Volatility'}
                   </th>
                   {screenerType === 'momentum' && (
-                    <th className="text-left p-3 text-muted-foreground font-medium">Pattern</th>
+                    <th className="text-left p-4 text-gray-300 font-semibold text-sm uppercase tracking-wider">Pattern</th>
                   )}
-                  <th className="text-center p-3 text-muted-foreground font-medium">Actions</th>
+                  <th className="text-center p-4 text-gray-300 font-semibold text-sm uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {currentResults.map((result, index) => (
-                  <tr key={result.symbol} className="border-b border-gray-800 hover:bg-gray-800/50">
-                    <td className="p-3">
+                  <tr key={result.symbol} className="group hover:bg-gradient-to-r hover:from-blue-500/5 hover:to-purple-500/5 transition-all duration-200">
+                    <td className="p-4 border-b border-gray-800/50">
                       <input
                         type="checkbox"
                         checked={selectedStocks.has(result.symbol)}
                         onChange={() => toggleStockSelection(result.symbol)}
-                        className="rounded border-gray-600 bg-gray-800 text-purple-500 focus:ring-purple-500"
+                        className="rounded-md border-gray-600 bg-gray-800/50 text-purple-500 focus:ring-purple-500 focus:ring-2 transition-all"
                       />
                     </td>
-                    <td className="p-3 text-white font-medium">#{startIndex + index + 1}</td>
-                    <td className="p-3 text-white font-mono">{result.symbol}</td>
-                    <td className="p-3 text-muted-foreground">{result.name || result.symbol}</td>
-                    <td className={`p-3 font-medium ${
-                      screenerType === 'momentum' 
-                        ? result.total_met >= 4 ? 'text-green-400' : result.total_met >= 3 ? 'text-yellow-400' : 'text-orange-400'
-                        : 'text-blue-400'
-                    }`}>
-                      {formatValue(result, screenerType!)}
+                    <td className="p-4 border-b border-gray-800/50">
+                      <span className="inline-flex items-center justify-center w-8 h-8 bg-gradient-to-br from-purple-500/20 to-blue-500/20 rounded-full text-white font-semibold text-sm">
+                        {startIndex + index + 1}
+                      </span>
+                    </td>
+                    <td className="p-4 border-b border-gray-800/50">
+                      <span className="font-mono font-semibold text-white bg-gray-800/50 px-3 py-1 rounded-lg">{result.symbol}</span>
+                    </td>
+                    <td className="p-4 border-b border-gray-800/50 text-gray-300">{result.name || result.symbol}</td>
+                    <td className="p-4 border-b border-gray-800/50">
+                      <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${
+                        screenerType === 'momentum' 
+                          ? result.confidence_score !== undefined 
+                            ? result.confidence_score >= 80 ? 'bg-green-500/20 text-green-400 border border-green-500/30' : result.confidence_score >= 60 ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                            : result.total_met >= 5 ? 'bg-green-500/20 text-green-400 border border-green-500/30' : result.total_met >= 4 ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                          : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                      }`}>
+                        {formatValue(result, screenerType!)}
+                      </span>
                     </td>
                     {screenerType === 'momentum' && (
-                      <td className={`p-3 font-medium ${getPatternStrengthColor(result.pattern_strength || '')}`}>
-                        <div className="flex items-center gap-1">
-                          <Star className="h-4 w-4" />
+                      <td className="p-4 border-b border-gray-800/50">
+                        <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${getPatternStrengthColor(result.pattern_strength || '')} ${
+                          result.pattern_strength === 'Strong' ? 'bg-green-500/10 border border-green-500/30' :
+                          result.pattern_strength === 'Moderate' ? 'bg-yellow-500/10 border border-yellow-500/30' :
+                          'bg-red-500/10 border border-red-500/30'
+                        }`}>
                           {result.pattern_strength}
-                        </div>
+                        </span>
                       </td>
                     )}
-                    <td className="p-3">
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={() => fetchStockData(result.symbol)}
-                          className="px-3 py-1 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded text-sm transition-colors"
-                        >
-                          Chart
-                        </button>
+                    <td className="p-4 border-b border-gray-800/50">
+                      <div className="flex gap-3 justify-center">
+
                         {screenerType === 'momentum' && (
                           <button 
                             onClick={() => analyzeMomentumPattern(result.symbol)}
-                            className="px-3 py-1 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded text-sm transition-colors"
+                            className="px-4 py-2 bg-gradient-to-r from-purple-500/20 to-blue-500/20 hover:from-purple-500/30 hover:to-blue-500/30 text-purple-400 rounded-lg text-sm font-medium transition-all duration-200 border border-purple-500/30 hover:border-purple-400/50"
                           >
                             Analyze
                           </button>
@@ -973,25 +1020,25 @@ export default function Screeners() {
           
           {/* Pagination Controls */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between mt-6 pt-4 border-t border-gray-700">
+            <div className="flex items-center justify-between mt-8 pt-6 border-t border-gray-700/50">
               <div className="text-sm text-muted-foreground">
                 Showing {startIndex + 1} to {Math.min(endIndex, allResults.length)} of {allResults.length} results
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3">
                 <button
                   onClick={() => handlePageChange(currentPage - 1)}
                   disabled={currentPage === 1}
-                  className="px-3 py-1 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 text-white rounded text-sm transition-colors"
+                  className="px-4 py-2 bg-gradient-to-r from-gray-700/50 to-gray-600/50 hover:from-gray-600/50 hover:to-gray-500/50 disabled:bg-gray-800/50 disabled:text-gray-500 text-white rounded-lg text-sm font-medium transition-all duration-200 border border-gray-600/30 disabled:border-gray-700/50"
                 >
                   Previous
                 </button>
-                <span className="text-sm text-muted-foreground">
+                <span className="px-4 py-2 bg-gray-800/50 text-gray-300 rounded-lg text-sm font-medium border border-gray-700/30">
                   Page {currentPage} of {totalPages}
                 </span>
                 <button
                   onClick={() => handlePageChange(currentPage + 1)}
                   disabled={currentPage === totalPages}
-                  className="px-3 py-1 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 text-white rounded text-sm transition-colors"
+                  className="px-4 py-2 bg-gradient-to-r from-gray-700/50 to-gray-600/50 hover:from-gray-600/50 hover:to-gray-500/50 disabled:bg-gray-800/50 disabled:text-gray-500 text-white rounded-lg text-sm font-medium transition-all duration-200 border border-gray-600/30 disabled:border-gray-700/50"
                 >
                   Next
                 </button>
@@ -1051,33 +1098,16 @@ export default function Screeners() {
               {momentumAnalysis && (
                 <div className="space-y-6">
                   {/* Pattern Summary */}
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <div className="p-4 bg-gray-800/50 rounded-lg">
-                      <h3 className="text-sm font-medium text-muted-foreground mb-2">Pattern Found</h3>
-                      <div className="flex items-center gap-2">
-                        {momentumAnalysis.pattern_found ? (
-                          <CheckCircle className="h-6 w-6 text-green-400" />
-                        ) : (
-                          <XCircle className="h-6 w-6 text-red-400" />
-                        )}
-                        <p className={`text-lg font-bold ${momentumAnalysis.pattern_found ? 'text-green-400' : 'text-red-400'}`}>
-                          {momentumAnalysis.pattern_found ? 'YES' : 'NO'}
-                        </p>
-                      </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-md mx-auto">
+                    <div className="p-6 bg-gradient-to-br from-blue-500/10 to-purple-500/10 rounded-xl border border-blue-500/20">
+                      <h3 className="text-sm font-medium text-muted-foreground mb-3">Confidence Score</h3>
+                      <p className="text-3xl font-bold text-white">{momentumAnalysis.confidence_score.toFixed(1)}%</p>
                     </div>
-                    <div className="p-4 bg-gray-800/50 rounded-lg">
-                      <h3 className="text-sm font-medium text-muted-foreground mb-2">Confidence Score</h3>
-                      <p className="text-2xl font-bold text-white">{momentumAnalysis.confidence_score.toFixed(1)}%</p>
-                    </div>
-                    <div className="p-4 bg-gray-800/50 rounded-lg">
-                      <h3 className="text-sm font-medium text-muted-foreground mb-2">Pattern Strength</h3>
-                      <p className={`text-lg font-bold ${getPatternStrengthColor(momentumAnalysis.pattern_strength)}`}>
+                    <div className="p-6 bg-gradient-to-br from-purple-500/10 to-pink-500/10 rounded-xl border border-purple-500/20">
+                      <h3 className="text-sm font-medium text-muted-foreground mb-3">Pattern Strength</h3>
+                      <p className={`text-2xl font-bold ${getPatternStrengthColor(momentumAnalysis.pattern_strength)}`}>
                         {momentumAnalysis.pattern_strength}
                       </p>
-                    </div>
-                    <div className="p-4 bg-gray-800/50 rounded-lg">
-                      <h3 className="text-sm font-medium text-muted-foreground mb-2">Criteria Met</h3>
-                      <p className="text-2xl font-bold text-white">{momentumAnalysis.total_criteria_met}/4</p>
                     </div>
                   </div>
 
@@ -1254,39 +1284,44 @@ export default function Screeners() {
       )}
 
       <div className="max-w-md">
-        <div className="card-glow p-6">
-          <div className="flex items-start justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <TrendingUp className="h-6 w-6 text-green-400" />
+        <div className="bg-gradient-to-br from-gray-800/60 to-gray-700/40 backdrop-blur-xl border border-green-500/20 rounded-2xl p-8 shadow-xl hover:shadow-green-500/10 transition-all duration-300">
+          <div className="flex items-start justify-between mb-6">
+            <div className="flex items-center gap-4">
+              <div className="p-3 bg-gradient-to-br from-green-500/20 to-emerald-500/20 rounded-xl border border-green-500/30">
+                <TrendingUp className="h-8 w-8 text-green-400" />
+              </div>
               <div>
-                <h3 className="text-lg font-semibold text-white">5 Star Momentum</h3>
-                <div className="w-3 h-3 rounded-full bg-green-400"></div>
+                <h3 className="text-2xl font-bold text-white mb-1">5 Star Momentum</h3>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded-full bg-green-400 animate-pulse"></div>
+                  <span className="text-green-400 font-medium text-sm">Ready to Screen</span>
+                </div>
               </div>
             </div>
           </div>
           
-          <p className="text-muted-foreground mb-4 text-sm">
-            Advanced momentum screening using the complete 5 Star Trading Setup checklist with 4 technical criteria
+          <p className="text-gray-400 mb-6 text-base leading-relaxed">
+            Advanced momentum screening using the complete 5 Star Trading Setup checklist with 6 technical criteria
           </p>
           
-          <div className="flex gap-2">
+          <div className="flex gap-3">
             <button 
               onClick={() => runScreener('momentum')}
               disabled={loading}
-              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg transition-colors disabled:opacity-50"
+              className="flex-1 flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-green-500/20 to-emerald-500/20 hover:from-green-500/30 hover:to-emerald-500/30 text-green-400 rounded-xl transition-all duration-200 disabled:opacity-50 font-semibold text-lg border border-green-500/30 hover:border-green-400/50"
             >
               {loading && screenerType === 'momentum' ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-5 w-5 animate-spin" />
               ) : (
-                <Zap className="h-4 w-4" />
+                <Zap className="h-5 w-5" />
               )}
               Run
             </button>
-            <button className="flex items-center justify-center px-3 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors">
-              <Edit className="h-4 w-4" />
+            <button className="flex items-center justify-center px-4 py-4 bg-gradient-to-r from-blue-500/20 to-cyan-500/20 hover:from-blue-500/30 hover:to-cyan-500/30 text-blue-400 rounded-xl transition-all duration-200 border border-blue-500/30 hover:border-blue-400/50">
+              <Edit className="h-5 w-5" />
             </button>
-            <button className="flex items-center justify-center px-3 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg transition-colors">
-              <Trash2 className="h-4 w-4" />
+            <button className="flex items-center justify-center px-4 py-4 bg-gradient-to-r from-red-500/20 to-pink-500/20 hover:from-red-500/30 hover:to-pink-500/30 text-red-400 rounded-xl transition-all duration-200 border border-red-500/30 hover:border-red-400/50">
+              <Trash2 className="h-5 w-5" />
             </button>
           </div>
         </div>

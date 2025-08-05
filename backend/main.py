@@ -133,6 +133,7 @@ class ScreenResult(BaseModel):
     criteria_met: Dict[str, bool]   # Map of criterion name to whether it was met
     total_met: int                  # Total number of criteria met
     pattern_strength: str           # "Strong" / "Moderate" / "Weak"
+    confidence_score: float         # Confidence percentage (0-100)
     name: Optional[str] = None      # Company name (optional, for backward compatibility)
 
 class MomentumCriteria(BaseModel):
@@ -1591,6 +1592,7 @@ async def get_ticker_data(
 class ScreeningRequest(BaseModel):
     symbols: Optional[List[str]] = None
     criteria: MomentumCriteria
+    include_bad_setups: bool = False
 
 class WatchlistSymbol(BaseModel):
     symbol: str
@@ -1670,10 +1672,8 @@ async def screen_momentum(request: ScreeningRequest):
                 strength = "Strong"
             elif confidence_score >= 60:
                 strength = "Moderate"
-            elif confidence_score >= 40:
-                strength = "Weak"
             else:
-                strength = "Very Weak"
+                strength = "Weak"
             
             # Create criteria met dictionary
             criteria_met = {
@@ -1692,6 +1692,7 @@ async def screen_momentum(request: ScreeningRequest):
                 criteria_met=criteria_met,
                 total_met=total_met,
                 pattern_strength=strength,
+                confidence_score=confidence_score,
                 name=company_name
             )
             
@@ -1778,10 +1779,8 @@ async def screen_momentum_stream(request: ScreeningRequest):
                     strength = "Strong"
                 elif confidence_score >= 60:
                     strength = "Moderate"
-                elif confidence_score >= 40:
-                    strength = "Weak"
                 else:
-                    strength = "Very Weak"
+                    strength = "Weak"
                 
                 # Create criteria met dictionary
                 criteria_met = {
@@ -1800,13 +1799,15 @@ async def screen_momentum_stream(request: ScreeningRequest):
                     criteria_met=criteria_met,
                     total_met=total_met,
                     pattern_strength=strength,
+                    confidence_score=confidence_score,
                     name=company_name
                 )
                 
-                # Only include stocks that meet minimum criteria
-                if total_met >= 3:  # At least 3 out of 6 criteria met
+                # Include based on criteria and include_bad_setups setting
+                if total_met >= 3 or request.include_bad_setups:  # At least 3 out of 6 criteria met OR include bad setups
                     results.append(result)
-                    yield f"data: {json.dumps({'type': 'result', 'result': result.dict(), 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Found pattern in {clean_symbol} ({total_met}/6 criteria)'})}\n\n"
+                    message = f"Found pattern in {clean_symbol} ({total_met}/6 criteria)" if total_met >= 3 else f"Bad setup in {clean_symbol} ({total_met}/6 criteria)"
+                    yield f"data: {json.dumps({'type': 'result', 'result': result.dict(), 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': message})}\n\n"
                 else:
                     yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'No pattern found in {clean_symbol}'})}\n\n"
                 
@@ -1848,10 +1849,8 @@ async def analyze_momentum_pattern(
             strength = "Strong"
         elif confidence_score >= 60:
             strength = "Moderate"
-        elif confidence_score >= 40:
-            strength = "Weak"
         else:
-            strength = "Very Weak"
+            strength = "Weak"
         
         # Generate detailed analysis report
         analysis_report = f"""

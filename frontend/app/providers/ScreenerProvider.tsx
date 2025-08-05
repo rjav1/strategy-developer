@@ -8,6 +8,7 @@ interface ScreenResult {
   criteria_met: Record<string, boolean>
   total_met: number
   pattern_strength: string
+  confidence_score?: number  // Optional for backward compatibility
   name?: string
 }
 
