@@ -236,9 +236,9 @@ const WatchlistButton: React.FC<WatchlistButtonProps> = ({
   const isInCurrentWatchlist = targetWatchlist ? isInWatchlist(symbol, targetWatchlist.id) : false
 
   const sizeClasses = {
-    sm: 'px-2 py-1 text-xs',
-    md: 'px-3 py-1 text-sm', 
-    lg: 'px-4 py-2 text-base'
+    sm: 'px-3 py-1.5 text-xs',
+    md: 'px-4 py-2 text-sm', 
+    lg: 'px-5 py-2.5 text-base'
   }
 
   const iconSizes = {
@@ -264,10 +264,10 @@ const WatchlistButton: React.FC<WatchlistButtonProps> = ({
         disabled={loading}
         className={`
           ${sizeClasses[size]} 
-          rounded transition-colors disabled:opacity-50
+          rounded-lg text-sm font-medium transition-all duration-200 disabled:opacity-50 border
           ${isInCurrentWatchlist
-            ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
-            : 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30'
+            ? 'bg-gradient-to-r from-green-500/20 to-emerald-500/20 hover:from-green-500/30 hover:to-emerald-500/30 text-green-400 border-green-500/30 hover:border-green-400/50'
+            : 'bg-gradient-to-r from-orange-500/20 to-red-500/20 hover:from-orange-500/30 hover:to-red-500/30 text-orange-400 border-orange-500/30 hover:border-orange-400/50'
           }
           ${className}
         `}
