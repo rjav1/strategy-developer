@@ -1,10 +1,11 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Play, Settings, BarChart3, Clock, Target, Bookmark, Plus, X, TrendingUp, Download, RefreshCw } from 'lucide-react'
-import BacktestChart from '../../components/BacktestChart'
+import { Play, Settings, BarChart3, Clock, Target, Bookmark, Plus, X, TrendingUp, Download, RefreshCw, Terminal } from 'lucide-react'
 import BacktestResults from '../../components/BacktestResults'
 import TradeLog from '../../components/TradeLog'
+import LogConsole from '../../components/LogConsole'
+import Smooth30DayScroller from '../../components/Smooth30DayScroller'
 
 interface BacktestResult {
   success: boolean
@@ -14,15 +15,14 @@ interface BacktestResult {
     losing_trades: number
     win_rate: number
     total_pnl: number
-    average_pnl: number
-    best_trade: number
-    worst_trade: number
-    average_holding_period: number
+    total_return_pct: number
+    avg_trade_pnl: number
+    avg_win: number
+    avg_loss: number
+    avg_holding_days: number
     max_drawdown: number
     sharpe_ratio?: number
     profit_factor?: number
-    total_return: number
-    annualized_return: number
   }
   trades?: any[]
   price_data?: any[]
@@ -51,6 +51,11 @@ export default function BacktestEngine() {
   const [commission, setCommission] = useState(0.01)
   const [period, setPeriod] = useState('1y')
   const [selectedTickerForBacktest, setSelectedTickerForBacktest] = useState('')
+  
+  // Log console state
+  const [isLogConsoleOpen, setIsLogConsoleOpen] = useState(false)
+  
+  // Chart type removed - now using single Smooth30DayScroller
 
   // Cleanup refs for intervals and timeouts
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null)
@@ -136,6 +141,8 @@ export default function BacktestEngine() {
     setProgress(0)
     setCurrentTicker(ticker)
     setBacktestResult(null)
+    setSelectedTickerForBacktest(ticker)
+    setIsLogConsoleOpen(true) // Automatically show logs when backtest starts
 
     try {
       // Start backtest with progress tracking
@@ -603,25 +610,29 @@ export default function BacktestEngine() {
         </button>
       </div>
 
-      {/* Progress Indicator */}
-      {isRunning && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-muted-foreground">
-              Testing {currentTicker}...
-            </span>
-            <span className="text-purple-400 font-medium">
-              {progress}%
-            </span>
-          </div>
-          <div className="w-full bg-gray-700 rounded-full h-2">
-            <div 
-              className="bg-gradient-to-r from-purple-500 to-blue-500 h-2 rounded-full transition-all duration-300"
-              style={{ width: `${progress}%` }}
-            ></div>
-          </div>
+      {/* Log Console Toggle */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          {isRunning && (
+            <div className="flex items-center gap-2 text-sm">
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-500"></div>
+              <span className="text-muted-foreground">Testing {currentTicker}...</span>
+            </div>
+          )}
         </div>
-      )}
+        
+        <button
+          onClick={() => setIsLogConsoleOpen(!isLogConsoleOpen)}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+            isLogConsoleOpen 
+              ? 'bg-purple-600 text-white' 
+              : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+          }`}
+        >
+          <Terminal className="w-4 h-4" />
+          {isLogConsoleOpen ? 'Hide Logs' : 'Show Live Logs'}
+        </button>
+      </div>
 
       {/* Error Display */}
       {backtestResult && !backtestResult.success && (
@@ -654,9 +665,9 @@ export default function BacktestEngine() {
             </div>
           </div>
 
-          {/* Visual Chart */}
+          {/* Visual Chart - Single Smooth 30-Day Scroller */}
           {backtestResult.price_data && (
-            <BacktestChart
+            <Smooth30DayScroller
               priceData={backtestResult.price_data}
               trades={backtestResult.trades || []}
               momentumPeriods={backtestResult.momentum_periods || []}
@@ -682,6 +693,21 @@ export default function BacktestEngine() {
           )}
         </div>
       )}
+
+      {/* Log Console */}
+      <LogConsole 
+        isOpen={isLogConsoleOpen}
+        onClose={() => setIsLogConsoleOpen(false)}
+        backtestStatus={{
+          isRunning,
+          progress,
+          currentTicker,
+          phase: progress < 30 ? 'Fetching market data...' : 
+                 progress < 80 ? 'Running simulation...' : 
+                 progress < 100 ? 'Generating results...' : 
+                 'Completed'
+        }}
+      />
     </div>
   )
 } 

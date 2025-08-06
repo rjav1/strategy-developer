@@ -1,5 +1,5 @@
 import yfinance as yf
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -22,6 +22,7 @@ import concurrent.futures
 import requests
 import asyncio
 from pathlib import Path
+from logging_manager import logging_manager, log_info, log_warn, log_error, log_debug
 
 # Global cache for all NYSE tickers
 nyse_ticker_cache = None
@@ -3212,6 +3213,141 @@ async def remove_from_watchlist(symbol: str):
         save_watchlist(symbols)
     
     return WatchlistResponse(symbols=symbols)
+
+
+# Real-time logging endpoints
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """WebSocket endpoint for real-time log streaming"""
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    
+    try:
+        await websocket.accept()
+        log_info(f"New WebSocket client connected for log streaming from {client_ip}")
+        
+        # Subscribe to log updates
+        subscriber_queue = logging_manager.subscribe()
+        
+        try:
+            # Send connection confirmation
+            await websocket.send_text(json.dumps({
+                "type": "connected",
+                "message": "Log streaming active"
+            }))
+            
+            # Send recent logs first
+            recent_logs = logging_manager.get_logs(limit=50)
+            log_info(f"Sending {len(recent_logs)} recent log entries to client")
+            
+            for log_entry in recent_logs:
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "log",
+                        "data": log_entry.to_dict()
+                    }))
+                except Exception as e:
+                    log_error(f"Failed to send recent log entry: {e}")
+                    break
+            
+            # Stream new logs
+            while True:
+                try:
+                    # Wait for new log entry with timeout for heartbeat
+                    log_entry = await asyncio.wait_for(subscriber_queue.get(), timeout=30)
+                    
+                    # Send the log entry
+                    await websocket.send_text(json.dumps({
+                        "type": "log",
+                        "data": log_entry.to_dict()
+                    }))
+                    
+                except asyncio.TimeoutError:
+                    # Send heartbeat to keep connection alive
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "heartbeat",
+                            "timestamp": datetime.now().isoformat()
+                        }))
+                    except Exception as e:
+                        log_error(f"Failed to send heartbeat: {e}")
+                        break
+                        
+                except Exception as e:
+                    log_error(f"Error in WebSocket log streaming: {e}")
+                    break
+                    
+        except WebSocketDisconnect:
+            log_info(f"WebSocket client from {client_ip} disconnected normally")
+        except Exception as e:
+            log_error(f"Unexpected error in WebSocket connection from {client_ip}: {e}")
+        finally:
+            logging_manager.unsubscribe(subscriber_queue)
+            log_info(f"WebSocket client from {client_ip} cleanup completed")
+            
+    except Exception as e:
+        log_error(f"Failed to accept WebSocket connection from {client_ip}: {e}")
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except:
+            pass
+
+
+@app.get("/logs/stream")
+async def sse_logs():
+    """Server-Sent Events endpoint for real-time log streaming"""
+    async def generate():
+        subscriber_queue = logging_manager.subscribe()
+        
+        try:
+            # Send recent logs first
+            recent_logs = logging_manager.get_logs(limit=50)
+            for log_entry in recent_logs:
+                yield f"data: {json.dumps({'type': 'log', 'data': log_entry.to_dict()})}\n\n"
+            
+            # Stream new logs
+            while True:
+                try:
+                    log_entry = await asyncio.wait_for(subscriber_queue.get(), timeout=30)
+                    yield f"data: {json.dumps({'type': 'log', 'data': log_entry.to_dict()})}\n\n"
+                except asyncio.TimeoutError:
+                    # Send heartbeat
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                except Exception as e:
+                    log_error(f"Error in SSE log streaming: {e}")
+                    break
+        finally:
+            logging_manager.unsubscribe(subscriber_queue)
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+
+@app.get("/logs")
+async def get_logs(limit: int = Query(100, le=1000)):
+    """Get recent logs"""
+    logs = logging_manager.get_logs(limit=limit)
+    return {
+        "logs": [log.to_dict() for log in logs],
+        "total": len(logs)
+    }
+
+
+@app.delete("/logs")
+async def clear_logs():
+    """Clear all logs"""
+    logging_manager.clear_logs()
+    log_info("Log history cleared")
+    return {"message": "Logs cleared successfully"}
+
 
 if __name__ == "__main__":
     import uvicorn

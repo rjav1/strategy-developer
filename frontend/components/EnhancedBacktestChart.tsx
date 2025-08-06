@@ -132,24 +132,28 @@ export default function EnhancedBacktestChart({
         })
       }
 
-      // Sell annotation - always red
+      // Sell annotation
       if (trade.exit_date && trade.exit_price) {
         const sellCandle = candleData.find(c => c.date === trade.exit_date)
         if (sellCandle) {
           const pnlText = trade.pnl ? ` (${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)})` : ''
+          const isFinalExit = trade.exit_reason === 'Final candle auto-sell'
+          const sellText = isFinalExit ? `▼ Final Exit${pnlText}` : `▼ Sell${pnlText}`
+          const borderColor = isFinalExit ? '#fbbf24' : TRADE_COLORS.SELL // Yellow for final exit
+          
           annotations.push({
             x: trade.exit_date,
             y: trade.exit_price,
-            text: `▼ Sell${pnlText}`,
+            text: sellText,
             showarrow: true,
             arrowhead: 1,
             arrowsize: 1.5,
             arrowwidth: 2,
-            arrowcolor: TRADE_COLORS.SELL,
+            arrowcolor: borderColor,
             ax: 0,
             ay: 40,
             bgcolor: 'rgba(0,0,0,0.8)',
-            bordercolor: TRADE_COLORS.SELL,
+            bordercolor: borderColor,
             borderwidth: 2,
             font: {
               color: 'white',

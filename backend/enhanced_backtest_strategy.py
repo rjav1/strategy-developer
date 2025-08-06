@@ -36,6 +36,9 @@ import base64
 import io
 warnings.filterwarnings('ignore')
 
+# Import logging manager
+from logging_manager import logging_manager, log_info, log_warn, log_error, log_debug
+
 # Add the backend directory to the path to import existing functions
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -227,24 +230,28 @@ class EnhancedMomentumBacktester:
         self.daily_equity: List[float] = []
         self.daily_returns: List[float] = []
         
-        print(f"✅ Enhanced MomentumBacktester initialized for {self.ticker}")
+        log_info(f"Enhanced MomentumBacktester initialized for {self.ticker}", {"ticker": self.ticker}, "backtest")
     
     def fetch_data(self) -> bool:
         """Fetch and prepare data for backtesting"""
         try:
-            print(f"📊 Fetching data for {self.ticker} ({self.period})...")
+            log_info(f"Fetching data for {self.ticker} ({self.period})", {"ticker": self.ticker, "period": self.period}, "backtest")
             self.daily_data = fetch_ohlcv(self.ticker, self.period)
             
             if self.daily_data is None or len(self.daily_data) < 100:
-                print(f"❌ Insufficient data: {len(self.daily_data) if self.daily_data is not None else 0} days")
+                log_error(f"Insufficient data: {len(self.daily_data) if self.daily_data is not None else 0} days", {"ticker": self.ticker}, "backtest")
                 return False
             
-            print(f"✅ Fetched {len(self.daily_data)} days of data")
-            print(f"📅 Date range: {self.daily_data.index[0].date()} to {self.daily_data.index[-1].date()}")
+            log_info(f"Fetched {len(self.daily_data)} days of data", {"ticker": self.ticker, "days": len(self.daily_data)}, "backtest")
+            log_info(f"Date range: {self.daily_data.index[0].date()} to {self.daily_data.index[-1].date()}", {
+                "ticker": self.ticker,
+                "start_date": self.daily_data.index[0].date().isoformat(),
+                "end_date": self.daily_data.index[-1].date().isoformat()
+            }, "backtest")
             return True
             
         except Exception as e:
-            print(f"❌ Error fetching data: {e}")
+            log_error(f"Error fetching data: {e}", {"ticker": self.ticker, "error": str(e)}, "backtest")
             return False
     
     def run_daily_screener(self, current_date: datetime, lookback_data: pd.DataFrame) -> Tuple[bool, Dict, float]:
@@ -419,13 +426,24 @@ class EnhancedMomentumBacktester:
                         consol_data = lookback_data.iloc[consol_start_idx:consol_end_idx+1]
                         consolidation_high = consol_data['High'].max()
                         consolidation_low = consol_data['Low'].min()
-                        print(f"🔍 Consolidation range (excluding today): {consolidation_low:.2f} - {consolidation_high:.2f}")
+                        log_info(f"🔍 Consolidation range (excluding today): {consolidation_low:.2f} - {consolidation_high:.2f}", {
+                            "ticker": self.ticker,
+                            "consolidation_low": consolidation_low,
+                            "consolidation_high": consolidation_high,
+                            "date": current_date.date().isoformat()
+                        }, "backtest")
             except Exception as e:
-                print(f"⚠️ Error getting consolidation high: {e}")
+                log_warn(f"⚠️ Error getting consolidation high: {e}", {
+                    "ticker": self.ticker,
+                    "error": str(e)
+                }, "backtest")
                 return False
         
         if consolidation_high is None:
-            print(f"❌ No consolidation high found for {current_date.date()}")
+            log_warn(f"❌ No consolidation high found for {current_date.date()}", {
+                "ticker": self.ticker,
+                "date": current_date.date().isoformat()
+            }, "backtest")
             return False
         
         # Calculate 20-day average volume
@@ -435,8 +453,20 @@ class EnhancedMomentumBacktester:
         breakout = current_high > consolidation_high
         volume_confirmation = current_volume > avg_volume_20
         
-        print(f"🎯 Buy Signal Check {current_date.date()}: High={current_high:.2f} vs Consol={consolidation_high:.2f}, Vol={current_volume:.0f} vs Avg={avg_volume_20:.0f}")
-        print(f"   Breakout: {breakout}, Volume OK: {volume_confirmation}")
+        log_info(f"🎯 Buy Signal Check {current_date.date()}: High={current_high:.2f} vs Consol={consolidation_high:.2f}, Vol={current_volume:.0f} vs Avg={avg_volume_20:.0f}", {
+            "ticker": self.ticker,
+            "current_high": current_high,
+            "consolidation_high": consolidation_high,
+            "current_volume": current_volume,
+            "avg_volume_20": avg_volume_20,
+            "date": current_date.date().isoformat()
+        }, "backtest")
+        log_info(f"   Breakout: {breakout}, Volume OK: {volume_confirmation}", {
+            "ticker": self.ticker,
+            "is_breakout": breakout,
+            "has_volume": volume_confirmation,
+            "date": current_date.date().isoformat()
+        }, "backtest")
         
         return breakout and volume_confirmation
     
@@ -501,7 +531,13 @@ class EnhancedMomentumBacktester:
             }
         )
         
-        print(f"🟢 BUY: {shares} shares of {self.ticker} at ${buy_price:.2f} on {current_date.date()}")
+        log_info(f"🟢 BUY: {shares} shares of {self.ticker} at ${buy_price:.2f} on {current_date.date()}", {
+            "ticker": self.ticker,
+            "action": "BUY",
+            "shares": shares,
+            "price": buy_price,
+            "date": current_date.date().isoformat()
+        }, "backtest")
         return event
     
     def execute_sell(self, current_date: datetime, current_row: pd.Series, reason: str) -> MarketEvent:
@@ -544,7 +580,15 @@ class EnhancedMomentumBacktester:
             }
         )
         
-        print(f"🔴 SELL: {shares} shares of {self.ticker} at ${sell_price:.2f} on {current_date.date()} ({reason}) - P&L: ${trade_to_complete.pnl:.2f}")
+        log_info(f"🔴 SELL: {shares} shares of {self.ticker} at ${sell_price:.2f} on {current_date.date()} ({reason}) - P&L: ${trade_to_complete.pnl:.2f}", {
+            "ticker": self.ticker,
+            "action": "SELL",
+            "shares": shares,
+            "price": sell_price,
+            "reason": reason,
+            "pnl": trade_to_complete.pnl,
+            "date": current_date.date().isoformat()
+        }, "backtest")
         return event
     
     def calculate_daily_performance(self, current_date: datetime, current_price: float) -> Dict[str, float]:
@@ -604,13 +648,16 @@ class EnhancedMomentumBacktester:
     def run_simulation(self) -> bool:
         """Run the complete day-by-day simulation"""
         if self.daily_data is None:
-            print("❌ No data available for simulation")
+            log_error("No data available for simulation", {"ticker": self.ticker}, "backtest")
             return False
         
-        print(f"🚀 Starting simulation for {self.ticker}")
-        print(f"💰 Initial capital: ${self.initial_capital:,.2f}")
-        print(f"📅 Period: {self.daily_data.index[0].date()} to {self.daily_data.index[-1].date()}")
-        print("=" * 80)
+        log_info(f"Starting simulation for {self.ticker}", {"ticker": self.ticker}, "backtest")
+        log_info(f"Initial capital: ${self.initial_capital:,.2f}", {"ticker": self.ticker, "initial_capital": self.initial_capital}, "backtest")
+        log_info(f"Period: {self.daily_data.index[0].date()} to {self.daily_data.index[-1].date()}", {
+            "ticker": self.ticker,
+            "start_date": self.daily_data.index[0].date().isoformat(),
+            "end_date": self.daily_data.index[-1].date().isoformat()
+        }, "backtest")
         
         # Start simulation from day 50 to have sufficient lookback data
         start_idx = 50
@@ -626,7 +673,12 @@ class EnhancedMomentumBacktester:
             # Progress reporting
             if current_idx % 20 == 0:
                 progress = (current_idx - start_idx) / (total_days - start_idx) * 100
-                print(f"📊 Progress: {progress:.1f}% - {current_date.date()} - State: {self.state.value}")
+                log_info(f"Progress: {progress:.1f}% - {current_date.date()} - State: {self.state.value}", {
+                    "ticker": self.ticker,
+                    "progress": round(progress, 1),
+                    "current_date": current_date.date().isoformat(),
+                    "state": self.state.value
+                }, "backtest")
             
             # Run daily screener
             screener_result = self.run_daily_screener(current_date, lookback_data)
@@ -636,27 +688,51 @@ class EnhancedMomentumBacktester:
             daily_events = self.update_highlights_and_events(current_date, current_idx, screener_result)
             
             # Enhanced state machine logic with detailed logging
-            print(f"📊 {current_date.date()}: State={self.state.value}, Pattern={pattern_found}, Confidence={confidence:.1f}%")
+            log_info(f"📊 {current_date.date()}: State={self.state.value}, Pattern={pattern_found}, Confidence={confidence:.1f}%", {
+                "ticker": self.ticker,
+                "state": self.state.value,
+                "pattern_found": pattern_found,
+                "confidence": confidence,
+                "date": current_date.date().isoformat()
+            }, "backtest")
             
             if self.state == TradingState.NOT_IN_TRADE:
                 if pattern_found and confidence > 60:
                     self.state = TradingState.MOMENTUM_DETECTED
-                    print(f"🔴 MOMENTUM_DETECTED: Pattern detected for {self.ticker} on {current_date.date()} (confidence: {confidence:.1f}%)")
+                    log_info(f"🔴 MOMENTUM_DETECTED: Pattern detected for {self.ticker} on {current_date.date()} (confidence: {confidence:.1f}%)", {
+                        "ticker": self.ticker,
+                        "event": "momentum_detected",
+                        "confidence": confidence,
+                        "date": current_date.date().isoformat()
+                    }, "backtest")
             
             elif self.state == TradingState.MOMENTUM_DETECTED:
                 if not pattern_found or confidence < 60:
                     # Pattern no longer valid, revert to NOT_IN_TRADE
                     self.state = TradingState.NOT_IN_TRADE
-                    print(f"🔄 NOT_IN_TRADE: Pattern failed for {self.ticker} on {current_date.date()} (confidence: {confidence:.1f}%)")
+                    log_info(f"🔄 NOT_IN_TRADE: Pattern failed for {self.ticker} on {current_date.date()} (confidence: {confidence:.1f}%)", {
+                        "ticker": self.ticker,
+                        "event": "pattern_failed",
+                        "confidence": confidence,
+                        "date": current_date.date().isoformat()
+                    }, "backtest")
                 else:
                     # Check if consolidation criteria are met RIGHT NOW
                     if criteria_details and 'criterion2_3' in criteria_details:
                         consolidation_met = criteria_details['criterion2_3'].get('met', False)
                         if consolidation_met:
                             self.state = TradingState.CONSOLIDATION
-                            print(f"🟡 CONSOLIDATION: Consolidation criteria met for {self.ticker} on {current_date.date()}")
+                            log_info(f"🟡 CONSOLIDATION: Consolidation criteria met for {self.ticker} on {current_date.date()}", {
+                                "ticker": self.ticker,
+                                "event": "consolidation_detected",
+                                "date": current_date.date().isoformat()
+                            }, "backtest")
                         else:
-                            print(f"🔴 MOMENTUM_DETECTED: Still in momentum, consolidation not yet met for {self.ticker} on {current_date.date()}")
+                            log_info(f"🔴 MOMENTUM_DETECTED: Still in momentum, consolidation not yet met for {self.ticker} on {current_date.date()}", {
+                                "ticker": self.ticker,
+                                "event": "momentum_continuing",
+                                "date": current_date.date().isoformat()
+                            }, "backtest")
             
             elif self.state == TradingState.CONSOLIDATION:
                 # Check if consolidation criteria are still met
@@ -668,23 +744,39 @@ class EnhancedMomentumBacktester:
                     # Consolidation ended - check why
                     if not pattern_found or confidence < 60:
                         self.state = TradingState.NOT_IN_TRADE
-                        print(f"🔄 NOT_IN_TRADE: Pattern failed during consolidation for {self.ticker} on {current_date.date()}")
+                        log_info(f"🔄 NOT_IN_TRADE: Pattern failed during consolidation for {self.ticker} on {current_date.date()}", {
+                            "ticker": self.ticker,
+                            "event": "pattern_failed_consolidation",
+                            "date": current_date.date().isoformat()
+                        }, "backtest")
                     else:
                         # Consolidation ended but pattern still valid - check for breakout
                         if self.check_buy_signal(current_date, current_row):
                             buy_event = self.execute_buy(current_date, current_row)
                             daily_events.append(buy_event)
-                            print(f"🟢 BREAKOUT BUY: Consolidation ended with breakout for {self.ticker} on {current_date.date()}")
+                            log_info(f"🟢 BREAKOUT BUY: Consolidation ended with breakout for {self.ticker} on {current_date.date()}", {
+                                "ticker": self.ticker,
+                                "event": "breakout_buy",
+                                "date": current_date.date().isoformat()
+                            }, "backtest")
                         else:
                             # Consolidation ended without breakout - back to momentum or not in trade
                             self.state = TradingState.NOT_IN_TRADE
-                            print(f"🔄 NOT_IN_TRADE: Consolidation ended without breakout for {self.ticker} on {current_date.date()}")
+                            log_info(f"🔄 NOT_IN_TRADE: Consolidation ended without breakout for {self.ticker} on {current_date.date()}", {
+                                "ticker": self.ticker,
+                                "event": "consolidation_ended_no_breakout",
+                                "date": current_date.date().isoformat()
+                            }, "backtest")
                 else:
                     # Still in consolidation - check for breakout buy signal
                     if self.check_buy_signal(current_date, current_row):
                         buy_event = self.execute_buy(current_date, current_row)
                         daily_events.append(buy_event)
-                        print(f"🟢 CONSOLIDATION BUY: Breakout from consolidation for {self.ticker} on {current_date.date()}")
+                        log_info(f"🟢 CONSOLIDATION BUY: Breakout from consolidation for {self.ticker} on {current_date.date()}", {
+                            "ticker": self.ticker,
+                            "event": "consolidation_buy",
+                            "date": current_date.date().isoformat()
+                        }, "backtest")
             
             elif self.state == TradingState.IN_POSITION:
                 # Check for sell signal
@@ -692,9 +784,18 @@ class EnhancedMomentumBacktester:
                 if should_sell:
                     sell_event = self.execute_sell(current_date, current_row, sell_reason)
                     daily_events.append(sell_event)
-                    print(f"🔴 SELL: Position closed for {self.ticker} on {current_date.date()} - Reason: {sell_reason}")
+                    log_info(f"🔴 SELL: Position closed for {self.ticker} on {current_date.date()} - Reason: {sell_reason}", {
+                        "ticker": self.ticker,
+                        "event": "sell",
+                        "reason": sell_reason,
+                        "date": current_date.date().isoformat()
+                    }, "backtest")
                 else:
-                    print(f"🟢 HOLDING: Position maintained for {self.ticker} on {current_date.date()}")
+                    log_info(f"🟢 HOLDING: Position maintained for {self.ticker} on {current_date.date()}", {
+                        "ticker": self.ticker,
+                        "event": "holding",
+                        "date": current_date.date().isoformat()
+                    }, "backtest")
             
             # Calculate daily performance
             performance_metrics = self.calculate_daily_performance(current_date, current_row['Close'])
@@ -726,8 +827,61 @@ class EnhancedMomentumBacktester:
             self.backtest_frames.append(frame)
             self.market_events.extend(daily_events)
         
-        print("=" * 80)
-        print(f"✅ Simulation completed for {self.ticker}")
+        # Auto-sell at final candle if position is still open
+        final_date = self.daily_data.index[-1]
+        final_row = self.daily_data.iloc[-1]
+        
+        if self.state == TradingState.IN_POSITION and self.current_trade:
+            log_info(f"💼 {final_date.date()}: Auto-selling open position at final candle", {
+                "ticker": self.ticker,
+                "event": "auto_sell_final",
+                "date": final_date.date().isoformat()
+            }, "backtest")
+            
+            # Execute forced sell at final candle close price
+            sell_event = self.execute_sell(final_date, final_row, "Final candle auto-sell")
+            
+            # Create final frame with the forced sell
+            final_performance_metrics = self.calculate_daily_performance(final_date, final_row['Close'])
+            
+            final_frame = BacktestFrame(
+                current_date=final_date,
+                ohlcv={
+                    'open': final_row['Open'],
+                    'high': final_row['High'],
+                    'low': final_row['Low'],
+                    'close': final_row['Close'],
+                    'volume': final_row['Volume'],
+                    'trading_state': self.state.value,
+                    'sma_20': final_row.get('SMA20', None)
+                },
+                state=self.state,
+                active_highlights=[],
+                trade_events=[sell_event],
+                performance_metrics=final_performance_metrics
+            )
+            
+            # Update the last frame with the forced sell
+            if self.backtest_frames:
+                self.backtest_frames[-1] = final_frame
+            
+            self.market_events.append(sell_event)
+            
+            log_info(f"💼 {final_date.date()}: Final position closed at ${final_row['Close']:.2f}", {
+                "ticker": self.ticker,
+                "event": "final_position_closed",
+                "price": final_row['Close'],
+                "date": final_date.date().isoformat()
+            }, "backtest")
+        
+        log_info("=" * 80, {
+            "ticker": self.ticker,
+            "event": "simulation_completed"
+        }, "backtest")
+        log_info(f"✅ Simulation completed for {self.ticker}", {
+            "ticker": self.ticker,
+            "event": "simulation_completed"
+        }, "backtest")
         return True
     
     def generate_results(self) -> Dict[str, Any]:
