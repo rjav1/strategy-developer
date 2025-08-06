@@ -2697,7 +2697,7 @@ async def run_background_backtest(job_id: str, request: BacktestRequest):
         # Update status
         backtest_results[job_id].update({
             "status": "fetching_data",
-            "progress": 10,
+            "progress": 5,
             "message": "Fetching market data..."
         })
         
@@ -2708,7 +2708,7 @@ async def run_background_backtest(job_id: str, request: BacktestRequest):
             initial_capital=initial_capital
         )
         
-        if not backtester.fetch_data():
+        if not await backtester.fetch_data():
             backtest_results[job_id].update({
                 "status": "error",
                 "message": f"Could not fetch data for ticker {ticker}"
@@ -2718,12 +2718,22 @@ async def run_background_backtest(job_id: str, request: BacktestRequest):
         # Update status
         backtest_results[job_id].update({
             "status": "running_simulation",
-            "progress": 30,
-            "message": "Running simulation..."
+            "progress": 10,
+            "message": "Starting simulation..."
         })
         
-        # Run simulation
-        if not backtester.run_simulation():
+        # Define progress callback function
+        def update_progress(progress: float, message: str):
+            # Map simulation progress (0-100) to overall progress (10-95)
+            overall_progress = 10 + (progress * 0.85)  # 10% to 95%
+            backtest_results[job_id].update({
+                "status": "running_simulation",
+                "progress": round(overall_progress, 1),
+                "message": message
+            })
+        
+        # Run simulation with progress callback
+        if not await backtester.run_simulation(progress_callback=update_progress):
             backtest_results[job_id].update({
                 "status": "error",
                 "message": f"Simulation failed for ticker {ticker}"
@@ -2733,7 +2743,7 @@ async def run_background_backtest(job_id: str, request: BacktestRequest):
         # Update status
         backtest_results[job_id].update({
             "status": "generating_results",
-            "progress": 80,
+            "progress": 95,
             "message": "Generating results..."
         })
         
@@ -2784,35 +2794,31 @@ async def run_background_backtest(job_id: str, request: BacktestRequest):
                 return default
             if hasattr(value, 'item'):
                 return value.item()
-            return float(value) if isinstance(value, (int, float)) else default
-
-        response_data = {
+            return float(value)
+        
+        # Format final results
+        final_results = {
             "success": True,
             "results": {
-                "total_trades": int(safe_extract(metrics.get("total_trades", 0))),
-                "winning_trades": int(safe_extract(metrics.get("winning_trades", 0))),
-                "losing_trades": int(safe_extract(metrics.get("losing_trades", 0))),
-                "win_rate": round(safe_extract(metrics.get("win_rate", 0)), 1),
-                "total_pnl": round(safe_extract(metrics.get("total_pnl", 0)), 2),
-                "total_return_pct": round(safe_extract(metrics.get("total_return_pct", 0)), 2),
-                "avg_trade_pnl": round(safe_extract(metrics.get("avg_trade_pnl", 0)), 2),
-                "avg_win": round(safe_extract(metrics.get("avg_win", 0)), 2),
-                "avg_loss": round(abs(safe_extract(metrics.get("avg_loss", 0))), 2),
-                "avg_holding_days": round(safe_extract(metrics.get("avg_holding_days", 0)), 1),
-                "max_drawdown": round(safe_extract(metrics.get("max_drawdown", 0)), 2),
-                "sharpe_ratio": round(safe_extract(metrics.get("sharpe_ratio", 0)), 2),
-                "profit_factor": round(safe_extract(metrics.get("profit_factor", 0)), 2)
+                "total_trades": safe_extract(metrics.get("total_trades", 0)),
+                "winning_trades": safe_extract(metrics.get("winning_trades", 0)),
+                "losing_trades": safe_extract(metrics.get("losing_trades", 0)),
+                "win_rate": safe_extract(metrics.get("win_rate", 0)),
+                "total_pnl": safe_extract(metrics.get("total_pnl", 0)),
+                "total_return_pct": safe_extract(metrics.get("total_return_pct", 0)),
+                "avg_trade_pnl": safe_extract(metrics.get("avg_trade_pnl", 0)),
+                "avg_win": safe_extract(metrics.get("avg_win", 0)),
+                "avg_loss": safe_extract(metrics.get("avg_loss", 0)),
+                "avg_holding_days": safe_extract(metrics.get("avg_holding_days", 0)),
+                "max_drawdown": safe_extract(metrics.get("max_drawdown", 0)),
+                "sharpe_ratio": safe_extract(metrics.get("sharpe_ratio", 0)),
+                "profit_factor": safe_extract(metrics.get("profit_factor", 0))
             },
-            "trades": make_json_serializable(trades) if trades else [],
-            "price_data": make_json_serializable(price_data) if price_data else [],
-            "momentum_periods": make_json_serializable(momentum_periods) if momentum_periods else [],
+            "trades": trades,
+            "price_data": price_data,
+            "momentum_periods": momentum_periods,
             "buy_signals": buy_signals,
-            "sell_signals": sell_signals,
-            "market_events": make_json_serializable(market_events) if market_events else [],
-            "ticker": str(ticker),
-            "period": str(period),
-            "initial_capital": float(initial_capital),
-            "chart_path": str(results.get("chart_path", ""))
+            "sell_signals": sell_signals
         }
         
         # Update final status
@@ -2820,16 +2826,16 @@ async def run_background_backtest(job_id: str, request: BacktestRequest):
             "status": "completed",
             "progress": 100,
             "message": "Backtest completed successfully",
-            "results": response_data,
-            "completed_at": datetime.now().isoformat()
+            "results": final_results
         })
         
+        print(f"✅ Backtest completed for {ticker} - Job ID: {job_id}")
+        
     except Exception as e:
-        error_message = f"Error in background backtest: {str(e)}"
-        print(f"❌ {error_message}")
+        print(f"❌ Error in background backtest: {e}")
         backtest_results[job_id].update({
             "status": "error",
-            "message": error_message
+            "message": f"Backtest failed: {str(e)}"
         })
 
 @app.get("/backtest/progress/{job_id}")
@@ -3250,17 +3256,49 @@ async def websocket_logs(websocket: WebSocket):
                     log_error(f"Failed to send recent log entry: {e}")
                     break
             
-            # Stream new logs
+            # Stream new logs with improved error handling
+            consecutive_errors = 0
+            max_consecutive_errors = 5
+            
             while True:
                 try:
-                    # Wait for new log entry with timeout for heartbeat
-                    log_entry = await asyncio.wait_for(subscriber_queue.get(), timeout=30)
+                    # Wait for new log entry with longer timeout for long-running backtests
+                    log_entry = await asyncio.wait_for(subscriber_queue.get(), timeout=60)
+                    
+                    # Reset error counter on successful log
+                    consecutive_errors = 0
                     
                     # Send the log entry
-                    await websocket.send_text(json.dumps({
-                        "type": "log",
-                        "data": log_entry.to_dict()
-                    }))
+                    try:
+                        log_dict = log_entry.to_dict()
+                        # Ensure context is JSON serializable
+                        if log_dict.get('context'):
+                            log_dict['context'] = make_json_serializable(log_dict['context'])
+                        
+                        await websocket.send_text(json.dumps({
+                            "type": "log",
+                            "data": log_dict
+                        }))
+                    except Exception as e:
+                        # Send a safe version if serialization fails
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "log",
+                                "data": {
+                                    "timestamp": log_entry.timestamp,
+                                    "level": log_entry.level.value,
+                                    "message": log_entry.message,
+                                    "context": {},
+                                    "module": log_entry.module,
+                                    "serialization_error": str(e)
+                                }
+                            }))
+                        except Exception as send_error:
+                            log_error(f"Failed to send safe log version: {send_error}")
+                            consecutive_errors += 1
+                            if consecutive_errors >= max_consecutive_errors:
+                                log_error(f"Too many consecutive send errors, closing connection")
+                                break
                     
                 except asyncio.TimeoutError:
                     # Send heartbeat to keep connection alive
@@ -3269,13 +3307,21 @@ async def websocket_logs(websocket: WebSocket):
                             "type": "heartbeat",
                             "timestamp": datetime.now().isoformat()
                         }))
+                        # Reset error counter on successful heartbeat
+                        consecutive_errors = 0
                     except Exception as e:
                         log_error(f"Failed to send heartbeat: {e}")
-                        break
+                        consecutive_errors += 1
+                        if consecutive_errors >= max_consecutive_errors:
+                            log_error(f"Too many consecutive heartbeat errors, closing connection")
+                            break
                         
                 except Exception as e:
                     log_error(f"Error in WebSocket log streaming: {e}")
-                    break
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        log_error(f"Too many consecutive errors, closing connection")
+                        break
                     
         except WebSocketDisconnect:
             log_info(f"WebSocket client from {client_ip} disconnected normally")
@@ -3303,13 +3349,47 @@ async def sse_logs():
             # Send recent logs first
             recent_logs = logging_manager.get_logs(limit=50)
             for log_entry in recent_logs:
-                yield f"data: {json.dumps({'type': 'log', 'data': log_entry.to_dict()})}\n\n"
+                try:
+                    log_dict = log_entry.to_dict()
+                    # Ensure context is JSON serializable
+                    if log_dict.get('context'):
+                        log_dict['context'] = make_json_serializable(log_dict['context'])
+                    
+                    yield f"data: {json.dumps({'type': 'log', 'data': log_dict})}\n\n"
+                except Exception as e:
+                    # Send a safe version if serialization fails
+                    safe_data = {
+                        'timestamp': log_entry.timestamp,
+                        'level': log_entry.level.value,
+                        'message': log_entry.message,
+                        'context': {},
+                        'module': log_entry.module,
+                        'serialization_error': str(e)
+                    }
+                    yield f"data: {json.dumps({'type': 'log', 'data': safe_data})}\n\n"
             
             # Stream new logs
             while True:
                 try:
                     log_entry = await asyncio.wait_for(subscriber_queue.get(), timeout=30)
-                    yield f"data: {json.dumps({'type': 'log', 'data': log_entry.to_dict()})}\n\n"
+                    try:
+                        log_dict = log_entry.to_dict()
+                        # Ensure context is JSON serializable
+                        if log_dict.get('context'):
+                            log_dict['context'] = make_json_serializable(log_dict['context'])
+                        
+                        yield f"data: {json.dumps({'type': 'log', 'data': log_dict})}\n\n"
+                    except Exception as e:
+                        # Send a safe version if serialization fails
+                        safe_data = {
+                            'timestamp': log_entry.timestamp,
+                            'level': log_entry.level.value,
+                            'message': log_entry.message,
+                            'context': {},
+                            'module': log_entry.module,
+                            'serialization_error': str(e)
+                        }
+                        yield f"data: {json.dumps({'type': 'log', 'data': safe_data})}\n\n"
                 except asyncio.TimeoutError:
                     # Send heartbeat
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
@@ -3335,9 +3415,30 @@ async def sse_logs():
 async def get_logs(limit: int = Query(100, le=1000)):
     """Get recent logs"""
     logs = logging_manager.get_logs(limit=limit)
+    
+    # Convert logs to JSON-serializable format
+    serializable_logs = []
+    for log in logs:
+        try:
+            log_dict = log.to_dict()
+            # Ensure context is JSON serializable
+            if log_dict.get('context'):
+                log_dict['context'] = make_json_serializable(log_dict['context'])
+            serializable_logs.append(log_dict)
+        except Exception as e:
+            # If serialization fails, create a safe version
+            serializable_logs.append({
+                "timestamp": log.timestamp,
+                "level": log.level.value,
+                "message": log.message,
+                "context": {},
+                "module": log.module,
+                "serialization_error": str(e)
+            })
+    
     return {
-        "logs": [log.to_dict() for log in logs],
-        "total": len(logs)
+        "logs": serializable_logs,
+        "total": len(serializable_logs)
     }
 
 

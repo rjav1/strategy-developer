@@ -15,6 +15,8 @@ interface LogConsoleProps {
   isOpen: boolean
   onClose: () => void
   className?: string
+  height?: number
+  onHeightChange?: (height: number) => void
   backtestStatus?: {
     isRunning: boolean
     progress: number
@@ -37,7 +39,7 @@ const LOG_BACKGROUNDS = {
   ERROR: 'bg-red-900/30'
 }
 
-export default function LogConsole({ isOpen, onClose, className = '', backtestStatus }: LogConsoleProps) {
+export default function LogConsole({ isOpen, onClose, className = '', height = 256, onHeightChange, backtestStatus }: LogConsoleProps) {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [isConnected, setIsConnected] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
@@ -47,12 +49,58 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
   const [showBacktestOnly, setShowBacktestOnly] = useState<boolean>(true)
   const [connectionAttempts, setConnectionAttempts] = useState(0)
   const [isReconnecting, setIsReconnecting] = useState(false)
+  const [isResizing, setIsResizing] = useState(false)
+  const [currentHeight, setCurrentHeight] = useState(height)
   
   const logsContainerRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const pausedLogsRef = useRef<LogEntry[]>([])
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const maxReconnectAttempts = 10
+
+  // Update height when prop changes
+  useEffect(() => {
+    setCurrentHeight(height)
+  }, [height])
+
+  // Handle resize
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+  }
+
+  const handleResize = useCallback((e: MouseEvent) => {
+    if (!isResizing) return
+    
+    const newHeight = window.innerHeight - e.clientY
+    const minHeight = 200
+    const maxHeight = window.innerHeight * 0.8
+    
+    if (newHeight >= minHeight && newHeight <= maxHeight) {
+      setCurrentHeight(newHeight)
+      onHeightChange?.(newHeight)
+    }
+  }, [isResizing, onHeightChange])
+
+  const handleResizeEnd = useCallback(() => {
+    setIsResizing(false)
+  }, [])
+
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleResize)
+      document.addEventListener('mouseup', handleResizeEnd)
+      document.body.style.cursor = 'ns-resize'
+      document.body.style.userSelect = 'none'
+      
+      return () => {
+        document.removeEventListener('mousemove', handleResize)
+        document.removeEventListener('mouseup', handleResizeEnd)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+    }
+  }, [isResizing, handleResize, handleResizeEnd])
 
   // Test if backend is available and fetch initial logs
   const testBackendConnection = async (): Promise<boolean> => {
@@ -97,7 +145,9 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
   const connectWebSocket = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return
     if (connectionAttempts >= maxReconnectAttempts) {
-      console.log('❌ Max WebSocket reconnection attempts reached')
+      console.log('❌ Max WebSocket reconnection attempts reached, switching to HTTP polling')
+      // Switch to HTTP polling mode when WebSocket fails
+      startHttpPolling()
       return
     }
 
@@ -197,6 +247,10 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
             reconnectTimeoutRef.current = setTimeout(() => {
               connectWebSocket()
             }, delay)
+          } else {
+            // Switch to HTTP polling when WebSocket fails completely
+            console.log('🔄 Switching to HTTP polling mode')
+            startHttpPolling()
           }
         }
       }
@@ -219,9 +273,49 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
         reconnectTimeoutRef.current = setTimeout(() => {
           connectWebSocket()
         }, delay)
+      } else {
+        // Switch to HTTP polling when WebSocket fails completely
+        console.log('🔄 Switching to HTTP polling mode')
+        startHttpPolling()
       }
     }
   }, [connectionAttempts, isOpen, isPaused])
+
+  // HTTP polling fallback when WebSocket fails
+  const startHttpPolling = useCallback(() => {
+    console.log('📡 Starting HTTP polling mode for logs')
+    setIsConnected(false)
+    setIsReconnecting(false)
+    
+    // Poll for new logs every 2 seconds
+    const pollInterval = setInterval(async () => {
+      try {
+        const response = await fetch('http://localhost:8000/logs?limit=100')
+        if (response.ok) {
+          const data = await response.json()
+          if (data.logs && Array.isArray(data.logs)) {
+            setLogs(prev => {
+              // Only add new logs that we haven't seen before
+              const existingIds = new Set(prev.map(log => log.timestamp + log.message))
+              const newLogs = data.logs.filter((log: LogEntry) => 
+                !existingIds.has(log.timestamp + log.message)
+              )
+              if (newLogs.length > 0) {
+                console.log(`📝 HTTP polling: received ${newLogs.length} new logs`)
+              }
+              const combined = [...prev, ...newLogs]
+              return combined.slice(-500) // Keep only last 500 logs
+            })
+          }
+        }
+      } catch (error) {
+        console.error('HTTP polling failed:', error)
+      }
+    }, 2000)
+
+    // Store the interval ID for cleanup
+    reconnectTimeoutRef.current = pollInterval as any
+  }, [])
 
   // Auto-scroll to bottom when new logs arrive
   useEffect(() => {
@@ -229,301 +323,6 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
       logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight
     }
   }, [logs, autoScroll])
-
-  // Extract REAL backtest data when running (mirrors enhanced_backtest_strategy.py exactly)
-  useEffect(() => {
-    if (backtestStatus?.isRunning && !isConnected) {
-      // This will extract the REAL data from the actual backtest calculations
-      // For now, this serves as a placeholder for when we connect it to real data
-      const extractRealBacktestData = () => {
-        const ticker = backtestStatus.currentTicker
-        const progress = backtestStatus.progress
-        const logs: LogEntry[] = []
-        
-        if (progress < 30) {
-          // Phase 1: Data fetching
-          logs.push({
-            timestamp: new Date().toISOString(),
-            level: 'INFO',
-            message: `Starting simulation for ${ticker}`,
-            context: { ticker, phase: 'starting' },
-            module: 'backtest'
-          })
-          logs.push({
-            timestamp: new Date().toISOString(),
-            level: 'INFO',
-            message: `Initial capital: $50,000.00`,
-            context: { ticker, initial_capital: 50000 },
-            module: 'backtest'
-          })
-          logs.push({
-            timestamp: new Date().toISOString(),
-            level: 'INFO',
-            message: `Period: 2024-01-01 to 2024-12-31`,
-            context: { ticker, start_date: '2024-01-01', end_date: '2024-12-31' },
-            module: 'backtest'
-          })
-        } else if (progress >= 30 && progress < 80) {
-          // Phase 2: REAL simulation data extraction - mirrors enhanced_backtest_strategy.py exactly
-          
-          // Calculate simulation day based on progress (same as backend)
-          const simulationProgress = (progress - 30) / 50 // Normalize to 0-1
-          const totalDays = 365 // Year of trading data
-          const startIdx = 50 // Backend starts from day 50
-          const currentSimulationDay = Math.floor(simulationProgress * (totalDays - startIdx)) + startIdx
-          
-          // Create realistic dates (same period as backend)
-          const startDate = new Date(2024, 0, 1) // Jan 1, 2024
-          const currentDate = new Date(startDate)
-          currentDate.setDate(currentDate.getDate() + currentSimulationDay)
-          const dateStr = currentDate.toISOString().split('T')[0]
-          
-          // Progress reporting (every 20 days like backend)
-          if (currentSimulationDay % 20 === 0) {
-            const progressPercent = ((currentSimulationDay - startIdx) / (totalDays - startIdx) * 100)
-            logs.push({
-              timestamp: new Date().toISOString(),
-              level: 'INFO',
-              message: `Progress: ${progressPercent.toFixed(1)}% - ${dateStr} - State: NOT_IN_TRADE`,
-              context: { 
-                ticker,
-                progress: progressPercent,
-                current_date: dateStr,
-                state: 'NOT_IN_TRADE'
-              },
-              module: 'backtest'
-            })
-          }
-          
-          // Extract REAL market data (using realistic data generation that matches backend logic)
-          const extractRealMarketData = () => {
-            // Generate realistic market data based on the ticker and date
-            const basePrice = ticker === 'AAPL' ? 150 : 
-                            ticker === 'MSFT' ? 300 : 
-                            ticker === 'GOOGL' ? 120 : 
-                            ticker === 'TSLA' ? 200 : 
-                            100 + Math.random() * 100
-            
-            // Daily price data (OHLCV)
-            const dayVariation = (Math.random() - 0.5) * 0.1 // ±10% daily variation
-            const currentClose = basePrice * (1 + dayVariation)
-            const currentHigh = currentClose * (1 + Math.random() * 0.05)
-            const currentLow = currentClose * (1 - Math.random() * 0.05)
-            const currentVolume = Math.floor(1000000 + Math.random() * 5000000)
-            
-            // Calculate consolidation range (same logic as backend)
-            const consolidationPeriod = 10 // Days
-            const consolidationHigh = basePrice * (1 + Math.random() * 0.08)
-            const consolidationLow = basePrice * (1 - Math.random() * 0.05)
-            
-            // Calculate 20-day average volume (same as backend)
-            const avgVolume20 = currentVolume * (0.8 + Math.random() * 0.4)
-            
-            // Run screener logic (same confidence calculation as backend)
-            const patternFound = Math.random() > 0.4 // 60% chance of pattern
-            const confidence = patternFound ? 60 + Math.random() * 35 : Math.random() * 60
-            
-            // State machine logic (mirrors backend exactly)
-            const states = ['NOT_IN_TRADE', 'MOMENTUM_DETECTED', 'CONSOLIDATION', 'IN_POSITION']
-            const currentState = states[currentSimulationDay % 4]
-            
-            return {
-              dateStr,
-              currentClose,
-              currentHigh,
-              currentLow,
-              currentVolume,
-              consolidationHigh,
-              consolidationLow,
-              avgVolume20,
-              patternFound,
-              confidence,
-              currentState,
-              ticker
-            }
-          }
-          
-          const marketData = extractRealMarketData()
-          
-          // Daily state log (EXACT format from backend)
-          logs.push({
-            timestamp: new Date().toISOString(),
-            level: 'INFO',
-            message: `📊 ${marketData.dateStr}: State=${marketData.currentState}, Pattern=${marketData.patternFound}, Confidence=${marketData.confidence.toFixed(1)}%`,
-            context: {
-              ticker: marketData.ticker,
-              state: marketData.currentState,
-              pattern_found: marketData.patternFound,
-              confidence: marketData.confidence,
-              date: marketData.dateStr
-            },
-            module: 'backtest'
-          })
-          
-          // State-specific events (same logic as backend)
-          if (marketData.currentState === 'MOMENTUM_DETECTED' && marketData.patternFound && marketData.confidence > 60) {
-            logs.push({
-              timestamp: new Date().toISOString(),
-              level: 'INFO',
-              message: `🔴 MOMENTUM_DETECTED: Pattern detected for ${marketData.ticker} on ${marketData.dateStr} (confidence: ${marketData.confidence.toFixed(1)}%)`,
-              context: {
-                ticker: marketData.ticker,
-                event: 'momentum_detected',
-                confidence: marketData.confidence,
-                date: marketData.dateStr
-              },
-              module: 'backtest'
-            })
-          }
-          
-          if (marketData.currentState === 'CONSOLIDATION') {
-            logs.push({
-              timestamp: new Date().toISOString(),
-              level: 'INFO',
-              message: `🟡 CONSOLIDATION: Consolidation criteria met for ${marketData.ticker} on ${marketData.dateStr}`,
-              context: {
-                ticker: marketData.ticker,
-                event: 'consolidation_detected',
-                date: marketData.dateStr
-              },
-              module: 'backtest'
-            })
-            
-            // Consolidation range log (EXACT format from backend)
-            logs.push({
-              timestamp: new Date().toISOString(),
-              level: 'INFO',
-              message: `🔍 Consolidation range (excluding today): ${marketData.consolidationLow.toFixed(2)} - ${marketData.consolidationHigh.toFixed(2)}`,
-              context: {
-                ticker: marketData.ticker,
-                consolidation_low: marketData.consolidationLow,
-                consolidation_high: marketData.consolidationHigh,
-                date: marketData.dateStr
-              },
-              module: 'backtest'
-            })
-            
-            // Buy signal check (EXACT format from backend)
-            logs.push({
-              timestamp: new Date().toISOString(),
-              level: 'INFO',
-              message: `🎯 Buy Signal Check ${marketData.dateStr}: High=${marketData.currentHigh.toFixed(2)} vs Consol=${marketData.consolidationHigh.toFixed(2)}, Vol=${marketData.currentVolume.toFixed(0)} vs Avg=${marketData.avgVolume20.toFixed(0)}`,
-              context: {
-                ticker: marketData.ticker,
-                current_high: marketData.currentHigh,
-                consolidation_high: marketData.consolidationHigh,
-                current_volume: marketData.currentVolume,
-                avg_volume_20: marketData.avgVolume20,
-                date: marketData.dateStr
-              },
-              module: 'backtest'
-            })
-            
-            // Breakout and volume check (EXACT format from backend)
-            const breakout = marketData.currentHigh > marketData.consolidationHigh
-            const volumeConfirmation = marketData.currentVolume > marketData.avgVolume20
-            
-            logs.push({
-              timestamp: new Date().toISOString(),
-              level: 'INFO',
-              message: `   Breakout: ${breakout}, Volume OK: ${volumeConfirmation}`,
-              context: {
-                ticker: marketData.ticker,
-                is_breakout: breakout,
-                has_volume: volumeConfirmation,
-                date: marketData.dateStr
-              },
-              module: 'backtest'
-            })
-            
-            // Execute buy if conditions met (same logic as backend)
-            if (breakout && volumeConfirmation && Math.random() > 0.6) {
-              const shares = Math.floor(50000 * 0.95 / marketData.currentClose) // 95% of capital, same as backend
-              logs.push({
-                timestamp: new Date().toISOString(),
-                level: 'INFO',
-                message: `🟢 BUY: ${shares} shares of ${marketData.ticker} at $${marketData.currentClose.toFixed(2)} on ${marketData.dateStr}`,
-                context: {
-                  ticker: marketData.ticker,
-                  action: 'BUY',
-                  shares: shares,
-                  price: marketData.currentClose,
-                  date: marketData.dateStr
-                },
-                module: 'backtest'
-              })
-            }
-          }
-          
-          if (marketData.currentState === 'IN_POSITION') {
-            // Check for sell signal (same logic as backend)
-            if (Math.random() > 0.85) { // Occasional sell
-              const shares = Math.floor(50000 * 0.95 / 150) // Example shares
-              const sellPrice = marketData.currentClose
-              const entryPrice = sellPrice * (0.95 + Math.random() * 0.1) // Simulate entry price
-              const pnl = (sellPrice - entryPrice) * shares
-              const reason = ['Below Breakout Low', 'Below 20-day SMA'][Math.floor(Math.random() * 2)]
-              
-              logs.push({
-                timestamp: new Date().toISOString(),
-                level: 'INFO',
-                message: `🔴 SELL: ${shares} shares of ${marketData.ticker} at $${sellPrice.toFixed(2)} on ${marketData.dateStr} (${reason}) - P&L: $${pnl.toFixed(2)}`,
-                context: {
-                  ticker: marketData.ticker,
-                  action: 'SELL',
-                  shares: shares,
-                  price: sellPrice,
-                  reason: reason,
-                  pnl: pnl,
-                  date: marketData.dateStr
-                },
-                module: 'backtest'
-              })
-            } else {
-              logs.push({
-                timestamp: new Date().toISOString(),
-                level: 'INFO',
-                message: `🟢 HOLDING: Position maintained for ${marketData.ticker} on ${marketData.dateStr}`,
-                context: {
-                  ticker: marketData.ticker,
-                  event: 'holding',
-                  date: marketData.dateStr
-                },
-                module: 'backtest'
-              })
-            }
-          }
-        } else {
-          // Phase 3: Results generation
-          logs.push({
-            timestamp: new Date().toISOString(),
-            level: 'INFO',
-            message: `✅ Simulation completed for ${ticker}`,
-            context: { ticker, phase: 'completed' },
-            module: 'backtest'
-          })
-          
-          if (progress > 95) {
-            logs.push({
-              timestamp: new Date().toISOString(),
-              level: 'INFO',
-              message: `📊 Static chart saved: C:\\Users\\dhruv\\strategy-developer-1\\backend\\charts\\${ticker}_enhanced_backtest_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.png`,
-              context: { ticker, event: 'chart_saved' },
-              module: 'backtest'
-            })
-          }
-        }
-        
-        return logs
-      }
-      
-      const newLogs = extractRealBacktestData()
-      setLogs(prev => {
-        const combined = [...prev, ...newLogs]
-        return combined.slice(-500) // Keep only last 500
-      })
-    }
-  }, [backtestStatus?.phase, backtestStatus?.progress, backtestStatus?.isRunning, isConnected])
 
   // Connect WebSocket immediately when component mounts, regardless of panel state
   useEffect(() => {
@@ -634,25 +433,37 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
   if (!isOpen) return null
 
   return (
-    <div className={`fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-50 ${className}`}>
+    <div className={`fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-50 ${className}`} style={{ height: currentHeight }}>
+      {/* Resize Handle */}
+      <div 
+        className="absolute top-0 left-0 right-0 h-1 bg-gray-600 cursor-ns-resize hover:bg-gray-500 transition-colors"
+        onMouseDown={handleResizeStart}
+      />
+      
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-gray-700">
         <div className="flex items-center gap-3">
-          <h3 className="text-sm font-medium text-white">Live Logs</h3>
+          <h3 className="text-base font-medium text-white">Live Logs</h3>
           <div className={`w-2 h-2 rounded-full ${
             isConnected ? 'bg-green-400' : 
             isReconnecting ? 'bg-yellow-400 animate-pulse' : 
+            connectionAttempts >= maxReconnectAttempts ? 'bg-blue-400' :
             'bg-red-400'
           }`} />
-          <span className="text-xs text-gray-400">
-            {isConnected ? 'Connected' : 
+          <span className="text-sm text-gray-400">
+            {isConnected ? 'WebSocket Connected' : 
              isReconnecting ? `Reconnecting... (${connectionAttempts}/${maxReconnectAttempts})` :
-             connectionAttempts >= maxReconnectAttempts ? 'Connection Failed' :
+             connectionAttempts >= maxReconnectAttempts ? 'HTTP Polling Mode' :
              'Disconnected'}
           </span>
           {pausedLogsRef.current.length > 0 && (
-            <span className="text-xs text-yellow-400 bg-yellow-900/30 px-2 py-1 rounded">
+            <span className="text-sm text-yellow-400 bg-yellow-900/30 px-2 py-1 rounded">
               {pausedLogsRef.current.length} paused logs
+            </span>
+          )}
+          {connectionAttempts >= maxReconnectAttempts && (
+            <span className="text-sm text-blue-400 bg-blue-900/30 px-2 py-1 rounded">
+              Fallback Mode
             </span>
           )}
         </div>
@@ -662,7 +473,7 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
           <select
             value={levelFilter}
             onChange={(e) => setLevelFilter(e.target.value)}
-            className="text-xs bg-gray-800 text-white border border-gray-600 rounded px-2 py-1"
+            className="text-sm bg-gray-800 text-white border border-gray-600 rounded px-2 py-1"
           >
             <option value="ALL">All Levels</option>
             <option value="DEBUG">Debug</option>
@@ -677,18 +488,18 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
             placeholder="Filter logs..."
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            className="text-xs bg-gray-800 text-white border border-gray-600 rounded px-2 py-1 w-32"
+            className="text-sm bg-gray-800 text-white border border-gray-600 rounded px-2 py-1 w-32"
           />
 
           {/* Controls */}
-          {!isConnected && !isReconnecting && (
+          {!isConnected && !isReconnecting && connectionAttempts < maxReconnectAttempts && (
             <button
               onClick={() => {
                 setConnectionAttempts(0)
                 connectWebSocket()
               }}
               className="p-1 hover:bg-gray-700 rounded text-gray-300"
-              title="Retry connection"
+              title="Retry WebSocket connection"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
@@ -704,7 +515,7 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
 
           <button
             onClick={() => setAutoScroll(!autoScroll)}
-            className={`p-1 rounded text-xs px-2 py-1 ${autoScroll ? 'bg-blue-600 text-white' : 'hover:bg-gray-700 text-gray-300'}`}
+            className={`p-1 rounded text-sm px-2 py-1 ${autoScroll ? 'bg-blue-600 text-white' : 'hover:bg-gray-700 text-gray-300'}`}
             title="Toggle auto-scroll"
           >
             Auto
@@ -712,7 +523,7 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
 
           <button
             onClick={() => setShowBacktestOnly(!showBacktestOnly)}
-            className={`p-1 rounded text-xs px-2 py-1 ${showBacktestOnly ? 'bg-green-600 text-white' : 'hover:bg-gray-700 text-gray-300'}`}
+            className={`p-1 rounded text-sm px-2 py-1 ${showBacktestOnly ? 'bg-green-600 text-white' : 'hover:bg-gray-700 text-gray-300'}`}
             title="Toggle backtest-only filter"
           >
             {showBacktestOnly ? 'Backtest' : 'All'}
@@ -746,8 +557,8 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
       {/* Log content */}
       <div
         ref={logsContainerRef}
-        className="h-64 overflow-y-auto p-2 font-mono text-xs"
-        style={{ scrollbarWidth: 'thin' }}
+        className="overflow-y-auto p-2 font-mono text-sm"
+        style={{ height: `calc(${currentHeight}px - 120px)`, scrollbarWidth: 'thin' }}
       >
         {filteredLogs.length === 0 ? (
           <div className="text-gray-500 text-center py-8">
@@ -757,17 +568,17 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
           filteredLogs.map((log, index) => (
             <div
               key={index}
-              className={`mb-1 p-2 rounded ${LOG_BACKGROUNDS[log.level]} border-l-2 border-l-current`}
+              className={`mb-2 p-3 rounded ${LOG_BACKGROUNDS[log.level]} border-l-2 border-l-current`}
             >
               <div className="flex items-start gap-2">
-                <span className="text-gray-500 text-[10px] mt-0.5 min-w-[80px]">
+                <span className="text-gray-500 text-xs mt-0.5 min-w-[80px]">
                   {formatTimestamp(log.timestamp)}
                 </span>
-                <span className={`${LOG_COLORS[log.level]} font-medium min-w-[50px] text-[10px] mt-0.5`}>
+                <span className={`${LOG_COLORS[log.level]} font-medium min-w-[50px] text-xs mt-0.5`}>
                   {log.level}
                 </span>
                 {log.module && (
-                  <span className="text-purple-400 text-[10px] mt-0.5 min-w-[80px]">
+                  <span className="text-purple-400 text-xs mt-0.5 min-w-[80px]">
                     [{log.module}]
                   </span>
                 )}
@@ -776,7 +587,7 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
                 </span>
               </div>
               {log.context && Object.keys(log.context).length > 0 && (
-                <div className="mt-1 ml-[140px] text-gray-400 text-[10px]">
+                <div className="mt-2 ml-[140px] text-gray-400 text-xs">
                   {Object.entries(log.context).map(([key, value]) => (
                     <span key={key} className="mr-3">
                       {key}: {JSON.stringify(value)}
@@ -790,9 +601,13 @@ export default function LogConsole({ isOpen, onClose, className = '', backtestSt
       </div>
 
       {/* Footer */}
-      <div className="px-3 py-1 border-t border-gray-700 text-xs text-gray-400 flex justify-between">
+      <div className="px-3 py-2 border-t border-gray-700 text-sm text-gray-400 flex justify-between">
         <span>{filteredLogs.length} / {logs.length} logs {showBacktestOnly ? '(backtest only)' : '(all logs)'}</span>
-        <span>Live streaming from backend</span>
+        <span>
+          {isConnected ? 'WebSocket streaming' : 
+           connectionAttempts >= maxReconnectAttempts ? 'HTTP polling' : 
+           'Live streaming from backend'}
+        </span>
       </div>
     </div>
   )

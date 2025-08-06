@@ -36,11 +36,44 @@ class LogEntry:
     module: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        # Convert context to JSON-serializable format
+        context = self.context or {}
+        if context:
+            try:
+                # Import here to avoid circular imports
+                import numpy as np
+                import pandas as pd
+                
+                def convert_numpy_types(obj):
+                    if isinstance(obj, np.bool_):
+                        return bool(obj)
+                    elif isinstance(obj, np.integer):
+                        return int(obj)
+                    elif isinstance(obj, np.floating):
+                        return float(obj)
+                    elif isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    elif isinstance(obj, pd.Series):
+                        return obj.tolist()
+                    elif isinstance(obj, pd.DataFrame):
+                        return obj.to_dict('records')
+                    elif isinstance(obj, dict):
+                        return {k: convert_numpy_types(v) for k, v in obj.items()}
+                    elif isinstance(obj, list):
+                        return [convert_numpy_types(item) for item in obj]
+                    else:
+                        return obj
+                
+                context = convert_numpy_types(context)
+            except Exception:
+                # If conversion fails, use empty context
+                context = {}
+        
         return {
             "timestamp": self.timestamp,
             "level": self.level.value,
             "message": self.message,
-            "context": self.context or {},
+            "context": context,
             "module": self.module
         }
 

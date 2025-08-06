@@ -34,6 +34,7 @@ from enum import Enum
 import warnings
 import base64
 import io
+import asyncio
 warnings.filterwarnings('ignore')
 
 # Import logging manager
@@ -232,10 +233,12 @@ class EnhancedMomentumBacktester:
         
         log_info(f"Enhanced MomentumBacktester initialized for {self.ticker}", {"ticker": self.ticker}, "backtest")
     
-    def fetch_data(self) -> bool:
+    async def fetch_data(self) -> bool:
         """Fetch and prepare data for backtesting"""
         try:
             log_info(f"Fetching data for {self.ticker} ({self.period})", {"ticker": self.ticker, "period": self.period}, "backtest")
+            await asyncio.sleep(0)  # Yield control to event loop
+            
             self.daily_data = fetch_ohlcv(self.ticker, self.period)
             
             if self.daily_data is None or len(self.daily_data) < 100:
@@ -243,11 +246,14 @@ class EnhancedMomentumBacktester:
                 return False
             
             log_info(f"Fetched {len(self.daily_data)} days of data", {"ticker": self.ticker, "days": len(self.daily_data)}, "backtest")
+            await asyncio.sleep(0)  # Yield control to event loop
+            
             log_info(f"Date range: {self.daily_data.index[0].date()} to {self.daily_data.index[-1].date()}", {
                 "ticker": self.ticker,
                 "start_date": self.daily_data.index[0].date().isoformat(),
                 "end_date": self.daily_data.index[-1].date().isoformat()
             }, "backtest")
+            await asyncio.sleep(0)  # Yield control to event loop
             return True
             
         except Exception as e:
@@ -645,19 +651,24 @@ class EnhancedMomentumBacktester:
         drawdown = (equity_series - rolling_max) / rolling_max
         return abs(drawdown.min()) * 100
     
-    def run_simulation(self) -> bool:
-        """Run the complete day-by-day simulation"""
+    async def run_simulation(self, progress_callback=None) -> bool:
+        """Run the complete day-by-day simulation with async yields for real-time logging"""
         if self.daily_data is None:
             log_error("No data available for simulation", {"ticker": self.ticker}, "backtest")
             return False
         
         log_info(f"Starting simulation for {self.ticker}", {"ticker": self.ticker}, "backtest")
+        await asyncio.sleep(0)  # Yield control to event loop
+        
         log_info(f"Initial capital: ${self.initial_capital:,.2f}", {"ticker": self.ticker, "initial_capital": self.initial_capital}, "backtest")
+        await asyncio.sleep(0)  # Yield control to event loop
+        
         log_info(f"Period: {self.daily_data.index[0].date()} to {self.daily_data.index[-1].date()}", {
             "ticker": self.ticker,
             "start_date": self.daily_data.index[0].date().isoformat(),
             "end_date": self.daily_data.index[-1].date().isoformat()
         }, "backtest")
+        await asyncio.sleep(0)  # Yield control to event loop
         
         # Start simulation from day 50 to have sufficient lookback data
         start_idx = 50
@@ -670,15 +681,20 @@ class EnhancedMomentumBacktester:
             # Get lookback data for screener analysis
             lookback_data = self.daily_data.iloc[:current_idx+1]
             
+            # Calculate and report real progress
+            progress = (current_idx - start_idx) / (total_days - start_idx) * 100
+            if progress_callback:
+                progress_callback(progress, f"Processing {current_date.date()}")
+            
             # Progress reporting
             if current_idx % 20 == 0:
-                progress = (current_idx - start_idx) / (total_days - start_idx) * 100
                 log_info(f"Progress: {progress:.1f}% - {current_date.date()} - State: {self.state.value}", {
                     "ticker": self.ticker,
                     "progress": round(progress, 1),
                     "current_date": current_date.date().isoformat(),
                     "state": self.state.value
                 }, "backtest")
+                await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             # Run daily screener
             screener_result = self.run_daily_screener(current_date, lookback_data)
@@ -695,6 +711,7 @@ class EnhancedMomentumBacktester:
                 "confidence": confidence,
                 "date": current_date.date().isoformat()
             }, "backtest")
+            await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             if self.state == TradingState.NOT_IN_TRADE:
                 if pattern_found and confidence > 60:
@@ -705,6 +722,7 @@ class EnhancedMomentumBacktester:
                         "confidence": confidence,
                         "date": current_date.date().isoformat()
                     }, "backtest")
+                    await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             elif self.state == TradingState.MOMENTUM_DETECTED:
                 if not pattern_found or confidence < 60:
@@ -716,6 +734,7 @@ class EnhancedMomentumBacktester:
                         "confidence": confidence,
                         "date": current_date.date().isoformat()
                     }, "backtest")
+                    await asyncio.sleep(0)  # Yield control to event loop for real-time logging
                 else:
                     # Check if consolidation criteria are met RIGHT NOW
                     if criteria_details and 'criterion2_3' in criteria_details:
@@ -727,12 +746,14 @@ class EnhancedMomentumBacktester:
                                 "event": "consolidation_detected",
                                 "date": current_date.date().isoformat()
                             }, "backtest")
+                            await asyncio.sleep(0)  # Yield control to event loop for real-time logging
                         else:
                             log_info(f"🔴 MOMENTUM_DETECTED: Still in momentum, consolidation not yet met for {self.ticker} on {current_date.date()}", {
                                 "ticker": self.ticker,
                                 "event": "momentum_continuing",
                                 "date": current_date.date().isoformat()
                             }, "backtest")
+                            await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             elif self.state == TradingState.CONSOLIDATION:
                 # Check if consolidation criteria are still met
@@ -749,6 +770,7 @@ class EnhancedMomentumBacktester:
                             "event": "pattern_failed_consolidation",
                             "date": current_date.date().isoformat()
                         }, "backtest")
+                        await asyncio.sleep(0)  # Yield control to event loop for real-time logging
                     else:
                         # Consolidation ended but pattern still valid - check for breakout
                         if self.check_buy_signal(current_date, current_row):
@@ -759,6 +781,7 @@ class EnhancedMomentumBacktester:
                                 "event": "breakout_buy",
                                 "date": current_date.date().isoformat()
                             }, "backtest")
+                            await asyncio.sleep(0)  # Yield control to event loop for real-time logging
                         else:
                             # Consolidation ended without breakout - back to momentum or not in trade
                             self.state = TradingState.NOT_IN_TRADE
@@ -767,6 +790,7 @@ class EnhancedMomentumBacktester:
                                 "event": "consolidation_ended_no_breakout",
                                 "date": current_date.date().isoformat()
                             }, "backtest")
+                            await asyncio.sleep(0)  # Yield control to event loop for real-time logging
                 else:
                     # Still in consolidation - check for breakout buy signal
                     if self.check_buy_signal(current_date, current_row):
@@ -777,6 +801,7 @@ class EnhancedMomentumBacktester:
                             "event": "consolidation_buy",
                             "date": current_date.date().isoformat()
                         }, "backtest")
+                        await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             elif self.state == TradingState.IN_POSITION:
                 # Check for sell signal
@@ -790,12 +815,14 @@ class EnhancedMomentumBacktester:
                         "reason": sell_reason,
                         "date": current_date.date().isoformat()
                     }, "backtest")
+                    await asyncio.sleep(0)  # Yield control to event loop for real-time logging
                 else:
                     log_info(f"🟢 HOLDING: Position maintained for {self.ticker} on {current_date.date()}", {
                         "ticker": self.ticker,
                         "event": "holding",
                         "date": current_date.date().isoformat()
                     }, "backtest")
+                    await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             # Calculate daily performance
             performance_metrics = self.calculate_daily_performance(current_date, current_row['Close'])
@@ -837,6 +864,7 @@ class EnhancedMomentumBacktester:
                 "event": "auto_sell_final",
                 "date": final_date.date().isoformat()
             }, "backtest")
+            await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             # Execute forced sell at final candle close price
             sell_event = self.execute_sell(final_date, final_row, "Final candle auto-sell")
@@ -873,15 +901,19 @@ class EnhancedMomentumBacktester:
                 "price": final_row['Close'],
                 "date": final_date.date().isoformat()
             }, "backtest")
+            await asyncio.sleep(0)  # Yield control to event loop for real-time logging
         
         log_info("=" * 80, {
             "ticker": self.ticker,
             "event": "simulation_completed"
         }, "backtest")
+        await asyncio.sleep(0)  # Yield control to event loop for real-time logging
+        
         log_info(f"✅ Simulation completed for {self.ticker}", {
             "ticker": self.ticker,
             "event": "simulation_completed"
         }, "backtest")
+        await asyncio.sleep(0)  # Yield control to event loop for real-time logging
         return True
     
     def generate_results(self) -> Dict[str, Any]:

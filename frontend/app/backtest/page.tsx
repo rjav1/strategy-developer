@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Play, Settings, BarChart3, Clock, Target, Bookmark, Plus, X, TrendingUp, Download, RefreshCw, Terminal } from 'lucide-react'
+import { Play, Settings, BarChart3, Clock, Target, Bookmark, Plus, X, TrendingUp, Download, RefreshCw, Terminal, Trash2 } from 'lucide-react'
 import BacktestResults from '../../components/BacktestResults'
 import TradeLog from '../../components/TradeLog'
 import LogConsole from '../../components/LogConsole'
@@ -51,9 +51,14 @@ export default function BacktestEngine() {
   const [commission, setCommission] = useState(0.01)
   const [period, setPeriod] = useState('1y')
   const [selectedTickerForBacktest, setSelectedTickerForBacktest] = useState('')
+  const [backtestPhase, setBacktestPhase] = useState<string>('')
+  const [jobId, setJobId] = useState<string>('')
+  const [showClearLogsDialog, setShowClearLogsDialog] = useState(false)
+  const [pendingBacktest, setPendingBacktest] = useState<{ticker: string, shouldClear: boolean} | null>(null)
   
   // Log console state
   const [isLogConsoleOpen, setIsLogConsoleOpen] = useState(false)
+  const [logsHeight, setLogsHeight] = useState(256) // Default height in pixels
   
   // Chart type removed - now using single Smooth30DayScroller
 
@@ -137,12 +142,45 @@ export default function BacktestEngine() {
 
   // Run momentum backtest
   const runMomentumBacktest = async (ticker: string) => {
+    // Check if there are existing logs and show confirmation dialog
+    try {
+      const response = await fetch('http://localhost:8000/logs?limit=1')
+      if (response.ok) {
+        const data = await response.json()
+        if (data.logs && data.logs.length > 0) {
+          // Show confirmation dialog
+          setPendingBacktest({ ticker, shouldClear: false })
+          setShowClearLogsDialog(true)
+          return
+        }
+      }
+    } catch (error) {
+      console.warn('Could not check existing logs:', error)
+    }
+    
+    // If no existing logs, start backtest directly
+    await startBacktest(ticker, false)
+  }
+
+  // Start the actual backtest
+  const startBacktest = async (ticker: string, shouldClearLogs: boolean) => {
     setIsRunning(true)
     setProgress(0)
     setCurrentTicker(ticker)
     setBacktestResult(null)
     setSelectedTickerForBacktest(ticker)
+    setBacktestPhase('Starting...')
     setIsLogConsoleOpen(true) // Automatically show logs when backtest starts
+
+    // Clear logs only if user confirmed
+    if (shouldClearLogs) {
+      try {
+        await fetch('http://localhost:8000/logs', { method: 'DELETE' })
+        console.log('✅ Logs cleared for new backtest')
+      } catch (error) {
+        console.warn('Could not clear logs:', error)
+      }
+    }
 
     try {
       // Start backtest with progress tracking
@@ -163,6 +201,7 @@ export default function BacktestEngine() {
       }
 
       const { job_id } = await startResponse.json()
+      setJobId(job_id)
       
       // Poll for progress updates
       progressIntervalRef.current = setInterval(async () => {
@@ -175,8 +214,9 @@ export default function BacktestEngine() {
             // Update progress
             setProgress(progressData.progress || 0)
             
-            // Update current ticker message
+            // Update phase and current ticker message
             if (progressData.message) {
+              setBacktestPhase(progressData.message)
               setCurrentTicker(`${ticker} - ${progressData.message}`)
             }
             
@@ -189,6 +229,7 @@ export default function BacktestEngine() {
               setBacktestResult(progressData.results)
               setSelectedTickerForBacktest(ticker)
               setProgress(100)
+              setBacktestPhase('Completed')
               setIsRunning(false)
             }
             
@@ -213,6 +254,7 @@ export default function BacktestEngine() {
           progressIntervalRef.current = null
         }
         setIsRunning(false)
+        setBacktestPhase('Timeout')
         setBacktestResult({
           success: false,
           error: 'Backtest is taking longer than expected. Please check the console for progress or try a shorter time period.'
@@ -235,8 +277,17 @@ export default function BacktestEngine() {
         success: false,
         error: errorMessage
       })
+      setBacktestPhase('Error')
       setIsRunning(false)
-      setProgress(100)
+    }
+  }
+
+  // Handle clear logs dialog response
+  const handleClearLogsDialog = (shouldClear: boolean) => {
+    setShowClearLogsDialog(false)
+    if (pendingBacktest) {
+      startBacktest(pendingBacktest.ticker, shouldClear)
+      setPendingBacktest(null)
     }
   }
 
@@ -314,9 +365,11 @@ export default function BacktestEngine() {
 
   return (
     <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-white mb-2">Backtest Engine</h1>
-        <p className="text-muted-foreground">Run advanced backtesting simulations</p>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-3xl font-bold text-white">Backtest Engine</h1>
+          <p className="text-muted-foreground">Run advanced backtesting simulations</p>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -694,20 +747,84 @@ export default function BacktestEngine() {
         </div>
       )}
 
+      {/* Progress Bar Section */}
+      {isRunning && (
+        <div className="card-glow p-4 mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                <span className="text-sm font-medium text-white">Backtest in Progress</span>
+              </div>
+              <span className="text-sm text-gray-400">{currentTicker}</span>
+            </div>
+            <div className="text-sm text-gray-400">
+              {progress.toFixed(1)}% Complete
+            </div>
+          </div>
+          
+          {/* Progress Bar */}
+          <div className="w-full bg-gray-700 rounded-full h-3 mb-3">
+            <div 
+              className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out"
+              style={{ width: `${progress}%` }}
+            ></div>
+          </div>
+          
+          {/* Phase Display */}
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-300">{backtestPhase}</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsLogConsoleOpen(!isLogConsoleOpen)}
+                className="text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+              >
+                {isLogConsoleOpen ? 'Hide Logs' : 'Show Logs'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Log Console */}
       <LogConsole 
-        isOpen={isLogConsoleOpen}
+        isOpen={isLogConsoleOpen} 
         onClose={() => setIsLogConsoleOpen(false)}
+        height={logsHeight}
+        onHeightChange={setLogsHeight}
         backtestStatus={{
           isRunning,
           progress,
           currentTicker,
-          phase: progress < 30 ? 'Fetching market data...' : 
-                 progress < 80 ? 'Running simulation...' : 
-                 progress < 100 ? 'Generating results...' : 
-                 'Completed'
+          phase: backtestPhase
         }}
       />
+
+      {/* Clear Logs Confirmation Dialog */}
+      {showClearLogsDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 p-6 rounded-lg shadow-xl max-w-md w-full mx-4">
+            <h3 className="text-lg font-semibold text-white mb-4">Clear Logs Before Backtest?</h3>
+            <p className="text-gray-300 mb-6">
+              You have existing logs. Would you like to clear them before starting the new backtest for <strong>{pendingBacktest?.ticker}</strong>?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => handleClearLogsDialog(false)}
+                className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+              >
+                Keep Logs
+              </button>
+              <button
+                onClick={() => handleClearLogsDialog(true)}
+                className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+              >
+                Clear Logs
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 } 
