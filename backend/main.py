@@ -2358,6 +2358,7 @@ def make_json_serializable(obj):
     import numpy as np
     import pandas as pd
     from datetime import datetime, date
+    from dataclasses import is_dataclass, asdict
     
     if isinstance(obj, dict):
         return {key: make_json_serializable(value) for key, value in obj.items()}
@@ -2370,13 +2371,19 @@ def make_json_serializable(obj):
     elif isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
-        return float(obj)
+        value = float(obj)
+        if value != value or value == float('inf') or value == float('-inf'):
+            return None
+        return value
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
     elif isinstance(obj, (datetime, date)):
         return obj.isoformat()
     elif pd.isna(obj):
         return None
+    elif is_dataclass(obj):
+        # Handle dataclass objects properly using asdict
+        return make_json_serializable(asdict(obj))
     elif hasattr(obj, '__dict__'):
         # Handle objects with __dict__ by converting to dict
         return make_json_serializable(obj.__dict__)
@@ -2384,6 +2391,10 @@ def make_json_serializable(obj):
         # Handle numpy scalars that have .item() method
         return make_json_serializable(obj.item())
     else:
+        # Fallback for built-in floats that may be NaN/Inf
+        if isinstance(obj, float):
+            import math
+            return None if not math.isfinite(obj) else obj
         return obj
 
 
@@ -2428,8 +2439,26 @@ async def run_momentum_backtest(request: BacktestRequest):
         if not results["success"]:
             raise HTTPException(status_code=500, detail=results.get("error", f"Backtest failed for '{ticker}'"))
         
+        # Debug: Log the results before JSON serialization
+        print(f"🔍 Backend - Raw results before JSON serialization:")
+        print(f"  - Trades count: {len(results.get('trades', []))}")
+        print(f"  - Momentum periods count: {len(results.get('momentum_periods', []))}")
+        if results.get('trades'):
+            print(f"  - Sample trade: {results['trades'][0]}")
+        if results.get('momentum_periods'):
+            print(f"  - Sample momentum period: {results['momentum_periods'][0]}")
+        
         # Convert all data to JSON-serializable format
         results = make_json_serializable(results)
+        
+        # Debug: Log the results after JSON serialization
+        print(f"🔍 Backend - Results after JSON serialization:")
+        print(f"  - Trades count: {len(results.get('trades', []))}")
+        print(f"  - Momentum periods count: {len(results.get('momentum_periods', []))}")
+        if results.get('trades'):
+            print(f"  - Sample trade: {results['trades'][0]}")
+        if results.get('momentum_periods'):
+            print(f"  - Sample momentum period: {results['momentum_periods'][0]}")
         
         # Extract and format results for frontend with error handling
         metrics = results.get("results", {})
@@ -2841,8 +2870,334 @@ async def get_backtest_progress(job_id: str):
     """
     if job_id not in backtest_results:
         raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        payload = backtest_results[job_id]
+        # Debug: log keys and status
+        try:
+            print(f"📡 Progress GET {job_id}: status={payload.get('status')}, keys={list(payload.keys())}")
+        except Exception:
+            pass
+        # Sanitize before returning to avoid NaN/Inf JSON errors
+        safe_payload = make_json_serializable(payload)
+        return safe_payload
+    except Exception as e:
+        print(f"❌ Progress serialization error for job {job_id}: {e}")
+        # Return minimal safe payload
+        return {"status": "error", "message": f"Serialization error: {str(e)}"}
+
+@app.post("/backtest/multi-symbol")
+async def run_multi_symbol_backtest(request: dict):
+    """
+    Run multi-symbol momentum backtest with combined results
+    """
+    try:
+        symbols = request.get("symbols", [])
+        period = request.get("period", "1y")
+        initial_capital = request.get("initial_capital", 10000.0)
+        
+        if not symbols:
+            raise HTTPException(status_code=400, detail="No symbols provided")
+        
+        import uuid
+        job_id = str(uuid.uuid4())
+        backtest_results[job_id] = {
+            "status": "running",
+            "progress": 0,
+            "message": "Starting multi-symbol backtest...",
+            "created_at": datetime.now(),
+            "symbols": symbols,
+            "current_symbol": "",
+            "individual_results": {},
+            "combined_results": None
+        }
+        
+        print(f"🚀 Starting multi-symbol backtest for {len(symbols)} symbols: {symbols}")
+        
+        # Start background task
+        asyncio.create_task(process_multi_symbol_backtest(job_id, symbols, period, initial_capital))
+        
+        return {"job_id": job_id, "message": f"Multi-symbol backtest started for {len(symbols)} symbols"}
+        
+    except Exception as e:
+        print(f"❌ Multi-symbol backtest failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Multi-symbol backtest failed: {str(e)}")
+
+async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str, initial_capital: float):
+    """Background task to process multi-symbol backtest"""
+    try:
+        from enhanced_backtest_strategy import EnhancedMomentumBacktester
+        
+        individual_results = {}
+        all_trades = []
+        all_symbols_tested = []
+        total_initial_capital = len(symbols) * initial_capital
+        
+        total_symbols = len(symbols)
+        for i, symbol in enumerate(symbols):
+            try:
+                # Update progress
+                progress = (i / total_symbols) * 100
+                backtest_results[job_id].update({
+                    "progress": round(progress, 1),
+                    "message": f"Testing {symbol}... ({i+1}/{total_symbols})",
+                    "current_symbol": symbol,
+                    "symbols_completed": i,
+                    "symbols_total": total_symbols,
+                    "candle_progress": 0,
+                    "candle_total": 0
+                })
+                
+                print(f"📊 Processing symbol {i+1}/{len(symbols)}: {symbol}")
+                
+                # Initialize backtester for this symbol (copy exact pattern from working single-symbol backtest)
+                try:
+                    print(f"🔧 DEBUG: Creating backtester for {symbol} with period={period}, capital={initial_capital}")
+                    backtester = EnhancedMomentumBacktester(
+                        ticker=symbol,
+                        period=period,
+                        initial_capital=initial_capital
+                    )
+                    print(f"✅ DEBUG: Backtester created successfully for {symbol}")
+                    print(f"🔧 DEBUG: Backtester attributes - ticker: {backtester.ticker}, period: {backtester.period}")
+                    
+                    # Fetch data (exact same pattern as working backtest)
+                    print(f"🔍 DEBUG: About to call fetch_data() for {symbol}")
+                    try:
+                        fetch_result = await backtester.fetch_data()
+                        print(f"🔧 DEBUG: fetch_data() returned {fetch_result} for {symbol}")
+                        
+                        if hasattr(backtester, 'daily_data'):
+                            if backtester.daily_data is not None:
+                                print(f"🔧 DEBUG: daily_data exists with shape {backtester.daily_data.shape} for {symbol}")
+                                print(f"🔧 DEBUG: daily_data columns: {list(backtester.daily_data.columns)}")
+                                print(f"🔧 DEBUG: daily_data date range: {backtester.daily_data.index[0]} to {backtester.daily_data.index[-1]}")
+                            else:
+                                print(f"❌ DEBUG: daily_data is None for {symbol}")
+                        else:
+                            print(f"❌ DEBUG: daily_data attribute doesn't exist for {symbol}")
+                            
+                    except Exception as fetch_error:
+                        print(f"❌ DEBUG: Exception during fetch_data() for {symbol}: {type(fetch_error).__name__}: {str(fetch_error)}")
+                        import traceback
+                        print(f"❌ DEBUG: Full traceback: {traceback.format_exc()}")
+                        fetch_result = False
+                    
+                    if not fetch_result:
+                        print(f"❌ Could not fetch data for {symbol} - fetch_result was {fetch_result}")
+                        individual_results[symbol] = {
+                            "success": False,
+                            "error": f"Could not fetch data for {symbol} - fetch returned {fetch_result}",
+                            "results": {},
+                            "trades": []
+                        }
+                        continue
+                    
+                    print(f"✅ Data fetched for {symbol}")
+                    
+                    # Run simulation (exact same pattern as working backtest)
+                    print(f"🔄 DEBUG: About to call run_simulation() for {symbol}")
+                    try:
+                        # Inject a progress callback to update candle-level progress
+                        def update_progress(progress: float, message: str):
+                            try:
+                                backtest_results[job_id].update({
+                                    "candle_progress": round(progress, 1),
+                                    "candle_total": 100,
+                                    "message": f"{symbol}: {message}"
+                                })
+                            except Exception:
+                                pass
+                        simulation_result = await backtester.run_simulation(progress_callback=update_progress)
+                        print(f"🔧 DEBUG: run_simulation() returned {simulation_result} for {symbol}")
+                        
+                        if hasattr(backtester, 'backtest_frames'):
+                            print(f"🔧 DEBUG: backtest_frames length: {len(backtester.backtest_frames) if backtester.backtest_frames else 0} for {symbol}")
+                        
+                    except Exception as sim_error:
+                        print(f"❌ DEBUG: Exception during run_simulation() for {symbol}: {type(sim_error).__name__}: {str(sim_error)}")
+                        import traceback
+                        print(f"❌ DEBUG: Full simulation traceback: {traceback.format_exc()}")
+                        simulation_result = False
+                    
+                    if not simulation_result:
+                        print(f"❌ Simulation failed for {symbol} - simulation returned {simulation_result}")
+                        individual_results[symbol] = {
+                            "success": False,
+                            "error": f"Simulation failed for {symbol} - simulation returned {simulation_result}",
+                            "results": {},
+                            "trades": []
+                        }
+                        continue
+                    
+                    print(f"✅ Simulation completed for {symbol}")
+                    
+                    # Generate results (exact same pattern as working backtest)
+                    print(f"📊 DEBUG: About to call generate_results() for {symbol}")
+                    try:
+                        results = backtester.generate_results()
+                        print(f"🔧 DEBUG: generate_results() returned success={results.get('success', 'Unknown')} for {symbol}")
+                        
+                        if results.get("success"):
+                            print(f"🔧 DEBUG: Results keys for {symbol}: {list(results.keys())}")
+                            if "trades" in results:
+                                print(f"🔧 DEBUG: Number of trades for {symbol}: {len(results['trades']) if results['trades'] else 0}")
+                            if "results" in results:
+                                print(f"🔧 DEBUG: Results metrics keys for {symbol}: {list(results['results'].keys()) if results['results'] else 'None'}")
+                        else:
+                            print(f"❌ DEBUG: Results generation failed for {symbol}, error: {results.get('error', 'Unknown error')}")
+                            
+                    except Exception as results_error:
+                        print(f"❌ DEBUG: Exception during generate_results() for {symbol}: {type(results_error).__name__}: {str(results_error)}")
+                        import traceback
+                        print(f"❌ DEBUG: Full results traceback: {traceback.format_exc()}")
+                        results = {"success": False, "error": f"Exception in generate_results: {str(results_error)}"}
+                    
+                    if not results["success"]:
+                        print(f"❌ Results generation failed for {symbol} - success was {results.get('success')}")
+                        individual_results[symbol] = results
+                        continue
+                    
+                    # Convert results to JSON-serializable format (same as working backtest)
+                    results = make_json_serializable(results)
+                    
+                    individual_results[symbol] = results
+                    all_symbols_tested.append(symbol)
+                    
+                    # Add trades to combined list
+                    if results.get("trades"):
+                        print(f"📈 Found {len(results['trades'])} trades for {symbol}")
+                        for trade in results["trades"]:
+                            trade_copy = trade.copy()
+                            trade_copy["symbol"] = symbol
+                            all_trades.append(trade_copy)
+                    else:
+                        print(f"📉 No trades found for {symbol}")
+                        
+                    print(f"✅ {symbol} processing completed successfully")
+                    
+                except Exception as e:
+                    print(f"❌ Error processing {symbol}: {str(e)}")
+                    individual_results[symbol] = {
+                        "success": False,
+                        "error": f"Error processing {symbol}: {str(e)}",
+                        "results": {},
+                        "trades": []
+                    }
+                    
+            except Exception as e:
+                print(f"❌ Outer error processing {symbol}: {str(e)}")
+                individual_results[symbol] = {
+                    "success": False,
+                    "error": f"Outer error processing {symbol}: {str(e)}",
+                    "results": {},
+                    "trades": []
+                }
+        
+        # Calculate combined metrics
+        combined_results = calculate_combined_metrics(individual_results, all_trades, total_initial_capital, all_symbols_tested)
+        
+        # Update job with final results (sanitize payload to avoid NaN/Inf)
+        final_payload = {
+            "status": "completed",
+            "progress": 100,
+            "message": "Multi-symbol backtest completed successfully",
+            "individual_results": individual_results,
+            "combined_results": combined_results,
+            "results": combined_results,  # For frontend compatibility
+            "symbols_completed": total_symbols,
+            "symbols_total": total_symbols,
+            "candle_progress": 100,
+            "candle_total": 100
+        }
+        try:
+            final_payload = make_json_serializable(final_payload)
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to fully sanitize final payload: {e}")
+        backtest_results[job_id].update(final_payload)
+        
+        print(f"✅ Multi-symbol backtest completed for {len(all_symbols_tested)}/{len(symbols)} symbols")
+        
+    except Exception as e:
+        print(f"❌ Multi-symbol backtest processing failed: {str(e)}")
+        backtest_results[job_id].update({
+            "status": "error",
+            "message": f"Multi-symbol backtest failed: {str(e)}"
+        })
+
+def calculate_combined_metrics(individual_results: dict, all_trades: list, total_initial_capital: float, symbols_tested: list):
+    """Calculate combined performance metrics across all symbols"""
     
-    return backtest_results[job_id]
+    successful_results = {k: v for k, v in individual_results.items() if v.get("success", False)}
+    
+    if not successful_results:
+        return {
+            "success": False,
+            "error": "No symbols were successfully tested",
+            "results": {},
+            "trades": [],
+            "individual_breakdown": individual_results,
+            "symbols_tested": [],
+            "symbols_passed": [],
+            "symbols_failed": list(individual_results.keys())
+        }
+    
+    # Calculate combined metrics
+    total_trades = len(all_trades)
+    winning_trades = len([t for t in all_trades if t.get("pnl", 0) > 0])
+    losing_trades = len([t for t in all_trades if t.get("pnl", 0) <= 0])
+    
+    total_pnl = sum(t.get("pnl", 0) for t in all_trades)
+    total_return_pct = (total_pnl / total_initial_capital) * 100 if total_initial_capital > 0 else 0
+    
+    avg_trade_pnl = total_pnl / total_trades if total_trades > 0 else 0
+    avg_win = sum(t.get("pnl", 0) for t in all_trades if t.get("pnl", 0) > 0) / winning_trades if winning_trades > 0 else 0
+    avg_loss = abs(sum(t.get("pnl", 0) for t in all_trades if t.get("pnl", 0) <= 0) / losing_trades) if losing_trades > 0 else 0
+    
+    win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
+    
+    # Calculate profit factor
+    total_wins = sum(t.get("pnl", 0) for t in all_trades if t.get("pnl", 0) > 0)
+    total_losses = abs(sum(t.get("pnl", 0) for t in all_trades if t.get("pnl", 0) <= 0))
+    profit_factor = total_wins / total_losses if total_losses > 0 else float('inf') if total_wins > 0 else 0
+    
+    # Best and worst performing symbols
+    symbol_performance = {}
+    for symbol, result in successful_results.items():
+        if result.get("results", {}).get("total_pnl") is not None:
+            symbol_performance[symbol] = result["results"]["total_pnl"]
+    
+    best_symbol = max(symbol_performance.items(), key=lambda x: x[1]) if symbol_performance else ("N/A", 0)
+    worst_symbol = min(symbol_performance.items(), key=lambda x: x[1]) if symbol_performance else ("N/A", 0)
+    
+    return {
+        "success": True,
+        "results": {
+            "total_trades": total_trades,
+            "winning_trades": winning_trades,
+            "losing_trades": losing_trades,
+            "win_rate": round(win_rate, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_return_pct": round(total_return_pct, 2),
+            "avg_trade_pnl": round(avg_trade_pnl, 2),
+            "avg_win": round(avg_win, 2),
+            "avg_loss": round(avg_loss, 2),
+            "profit_factor": round(profit_factor, 2),
+            "symbols_tested": len(symbols_tested),
+            "symbols_passed": len(successful_results),
+            "symbols_failed": len(individual_results) - len(successful_results),
+            "best_symbol": best_symbol[0],
+            "best_symbol_pnl": round(best_symbol[1], 2),
+            "worst_symbol": worst_symbol[0],
+            "worst_symbol_pnl": round(worst_symbol[1], 2),
+            "total_initial_capital": total_initial_capital,
+            "avg_return_per_symbol": round(total_return_pct / len(successful_results), 2) if successful_results else 0
+        },
+        "trades": all_trades,
+        "individual_breakdown": individual_results,
+        "symbols_tested": symbols_tested,
+        "symbols_passed": list(successful_results.keys()),
+        "symbols_failed": [k for k, v in individual_results.items() if not v.get("success", False)]
+    }
 
 def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move_end_idx: int, adr_20: float = None) -> tuple[bool, dict]:
     """

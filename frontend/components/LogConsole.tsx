@@ -432,8 +432,18 @@ export default function LogConsole({ isOpen, onClose, className = '', height = 2
 
   if (!isOpen) return null
 
+  // Position the log console directly above the progress bar when running
+  // Progress bar section: p-4 (16px top + 16px bottom) + content (~100px) = ~132px total
+  const bottomOffset = backtestStatus?.isRunning ? 132 : 0
+
   return (
-    <div className={`fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-50 ${className}`} style={{ height: currentHeight }}>
+    <div 
+      className={`fixed left-0 right-0 bg-gray-900 border-t border-gray-700 z-50 ${className}`} 
+      style={{ 
+        height: currentHeight,
+        bottom: `${bottomOffset}px`
+      }}
+    >
       {/* Resize Handle */}
       <div 
         className="absolute top-0 left-0 right-0 h-1 bg-gray-600 cursor-ns-resize hover:bg-gray-500 transition-colors"

@@ -6,6 +6,7 @@ import BacktestResults from '../../components/BacktestResults'
 import TradeLog from '../../components/TradeLog'
 import LogConsole from '../../components/LogConsole'
 import Smooth30DayScroller from '../../components/Smooth30DayScroller'
+import MultiSymbolResults from '../../components/MultiSymbolResults'
 
 interface BacktestResult {
   success: boolean
@@ -46,10 +47,18 @@ export default function BacktestEngine() {
   const [isRunning, setIsRunning] = useState(false)
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null)
   const [progress, setProgress] = useState(0)
+  // Multi progress
+  const [symbolsCompleted, setSymbolsCompleted] = useState(0)
+  const [symbolsTotal, setSymbolsTotal] = useState(0)
+  const [candleProgress, setCandleProgress] = useState(0)
+  const [candleTotal, setCandleTotal] = useState(100)
   const [currentTicker, setCurrentTicker] = useState('')
   const [initialCapital, setInitialCapital] = useState(10000)
   const [commission, setCommission] = useState(0.01)
   const [period, setPeriod] = useState('1y')
+  const [customMonths, setCustomMonths] = useState(12) // For custom period selection
+  const [useCustomPeriod, setUseCustomPeriod] = useState(false)
+  const [backtestType, setBacktestType] = useState<'single' | 'multi'>('single')
   const [selectedTickerForBacktest, setSelectedTickerForBacktest] = useState('')
   const [backtestPhase, setBacktestPhase] = useState<string>('')
   const [jobId, setJobId] = useState<string>('')
@@ -59,6 +68,9 @@ export default function BacktestEngine() {
   // Log console state
   const [isLogConsoleOpen, setIsLogConsoleOpen] = useState(false)
   const [logsHeight, setLogsHeight] = useState(256) // Default height in pixels
+  
+  // Backend connection state
+  const [backendStatus, setBackendStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   
   // Chart type removed - now using single Smooth30DayScroller
 
@@ -111,9 +123,24 @@ export default function BacktestEngine() {
     const fetchStrategies = async () => {
       setLoadingStrategies(true)
       try {
-        const response = await fetch('http://localhost:8000/strategies')
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout
+        
+        const response = await fetch('http://localhost:8000/strategies', {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          signal: controller.signal
+        })
+        
+        clearTimeout(timeoutId)
+        
         if (response.ok) {
           const strategiesData = await response.json()
+          console.log('✅ Fetched strategies from backend:', strategiesData)
+          setBackendStatus('connected')
+          
           // Add momentum screener as built-in strategy
           const momentumStrategy = {
             id: 'momentum_screener',
@@ -122,9 +149,26 @@ export default function BacktestEngine() {
             description: 'Pattern detection with visual replay'
           }
           setStrategies([momentumStrategy, ...strategiesData])
+        } else {
+          console.error('❌ Backend returned error:', response.status, response.statusText)
+          setBackendStatus('disconnected')
+          // Fallback - just add momentum screener
+          setStrategies([{
+            id: 'momentum_screener',
+            name: 'Momentum Screener',
+            type: 'builtin',
+            description: 'Pattern detection with visual replay'
+          }])
         }
-      } catch (error) {
-        console.error('Failed to fetch strategies:', error)
+      } catch (error: any) {
+        if (error.name === 'AbortError') {
+          console.error('❌ Request timeout - backend may not be running')
+        } else {
+          console.error('❌ Failed to fetch strategies:', error)
+        }
+        
+        setBackendStatus('disconnected')
+        
         // Fallback - just add momentum screener
         setStrategies([{
           id: 'momentum_screener',
@@ -162,6 +206,27 @@ export default function BacktestEngine() {
     await startBacktest(ticker, false)
   }
 
+  const runMultiSymbolBacktest = async (symbols: string[]) => {
+    // Check if there are existing logs and show confirmation dialog
+    try {
+      const response = await fetch('http://localhost:8000/logs?limit=1')
+      if (response.ok) {
+        const data = await response.json()
+        if (data.logs && data.logs.length > 0) {
+          // Show confirmation dialog - use first symbol as representative
+          setPendingBacktest({ ticker: symbols.join(','), shouldClear: false })
+          setShowClearLogsDialog(true)
+          return
+        }
+      }
+    } catch (error) {
+      console.warn('Could not check existing logs:', error)
+    }
+    
+    // If no existing logs, start multi-symbol backtest directly
+    await startMultiSymbolBacktest(symbols, false)
+  }
+
   // Start the actual backtest
   const startBacktest = async (ticker: string, shouldClearLogs: boolean) => {
     setIsRunning(true)
@@ -183,6 +248,9 @@ export default function BacktestEngine() {
     }
 
     try {
+      // Determine the period to use
+      const finalPeriod = useCustomPeriod ? `${customMonths}mo` : period
+
       // Start backtest with progress tracking
       const startResponse = await fetch('http://localhost:8000/backtest/momentum/progress', {
         method: 'POST',
@@ -191,7 +259,7 @@ export default function BacktestEngine() {
         },
         body: JSON.stringify({
           ticker,
-          period,
+          period: finalPeriod,
           initial_capital: initialCapital
         })
       })
@@ -226,6 +294,30 @@ export default function BacktestEngine() {
                 clearInterval(progressIntervalRef.current)
                 progressIntervalRef.current = null
               }
+              
+              // Debug: Log the raw results from backend
+              console.log('🚀 BACKEND RESPONSE - EXTENSIVE DEBUG:')
+              console.log('🚀 Full progressData object:', JSON.stringify(progressData, null, 2))
+              console.log('🚀 progressData.results:', JSON.stringify(progressData.results, null, 2))
+              
+              console.log('🚀 TRADES FROM BACKEND:')
+              if (progressData.results.trades && progressData.results.trades.length > 0) {
+                progressData.results.trades.forEach((trade: any, index: number) => {
+                  console.log(`  Backend Trade ${index}:`, JSON.stringify(trade, null, 2))
+                })
+              } else {
+                console.log('  No trades from backend')
+              }
+              
+              console.log('🚀 MOMENTUM PERIODS FROM BACKEND:')
+              if (progressData.results.momentum_periods && progressData.results.momentum_periods.length > 0) {
+                progressData.results.momentum_periods.forEach((period: any, index: number) => {
+                  console.log(`  Backend Period ${index}:`, JSON.stringify(period, null, 2))
+                })
+              } else {
+                console.log('  No momentum periods from backend')
+              }
+              
               setBacktestResult(progressData.results)
               setSelectedTickerForBacktest(ticker)
               setProgress(100)
@@ -282,11 +374,152 @@ export default function BacktestEngine() {
     }
   }
 
+  // Start multi-symbol backtest
+  const startMultiSymbolBacktest = async (symbols: string[], shouldClearLogs: boolean) => {
+    setIsRunning(true)
+    setProgress(0)
+    setCurrentTicker(`Testing ${symbols.length} symbols...`)
+    setBacktestResult(null)
+    setSelectedTickerForBacktest('')
+    setBacktestPhase('Starting multi-symbol backtest...')
+    setIsLogConsoleOpen(true)
+
+    // Clear logs only if user confirmed
+    if (shouldClearLogs) {
+      try {
+        await fetch('http://localhost:8000/logs', { method: 'DELETE' })
+        console.log('✅ Logs cleared for new backtest')
+      } catch (error) {
+        console.warn('Could not clear logs:', error)
+      }
+    }
+
+    try {
+      // Determine the period to use
+      const finalPeriod = useCustomPeriod ? `${customMonths}mo` : period
+
+      // Start multi-symbol backtest
+      const startResponse = await fetch('http://localhost:8000/backtest/multi-symbol', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          symbols,
+          period: finalPeriod,
+          initial_capital: initialCapital
+        })
+      })
+
+      if (!startResponse.ok) {
+        throw new Error(`Failed to start multi-symbol backtest: ${startResponse.status}`)
+      }
+
+      const { job_id } = await startResponse.json()
+      setJobId(job_id)
+      
+      // Poll for progress updates
+      progressIntervalRef.current = setInterval(async () => {
+        try {
+          const progressResponse = await fetch(`http://localhost:8000/backtest/progress/${job_id}`)
+          
+          if (progressResponse.ok) {
+            const progressData = await progressResponse.json()
+            
+            // Update progress
+            setProgress(progressData.progress || 0)
+            
+            // Multi: update symbol and candle-level progress if present
+            if (backtestType === 'multi') {
+              setSymbolsCompleted(progressData.symbols_completed || 0)
+              setSymbolsTotal(progressData.symbols_total || symbols.length)
+              setCandleProgress(progressData.candle_progress || 0)
+              setCandleTotal(progressData.candle_total || 100)
+            }
+            
+            // Update phase and current ticker message
+            if (progressData.message) {
+              setBacktestPhase(progressData.message)
+              setCurrentTicker(progressData.current_symbol || `Multi-symbol: ${progressData.message}`)
+            }
+            
+            // Check if completed
+            if (progressData.status === 'completed' && progressData.results) {
+              if (progressIntervalRef.current) {
+                clearInterval(progressIntervalRef.current)
+                progressIntervalRef.current = null
+              }
+              
+              console.log('🚀 Multi-symbol backtest completed:', progressData.results)
+              
+              setBacktestResult(progressData.results)
+              setSelectedTickerForBacktest('Multi-Symbol Portfolio')
+              setProgress(100)
+              setBacktestPhase('Completed')
+              setIsRunning(false)
+            }
+            
+            // Check if error
+            if (progressData.status === 'error') {
+              if (progressIntervalRef.current) {
+                clearInterval(progressIntervalRef.current)
+                progressIntervalRef.current = null
+              }
+              throw new Error(progressData.message || 'Multi-symbol backtest failed')
+            }
+          }
+        } catch (error) {
+          console.error('Progress check failed:', error)
+        }
+      }, 2000) // Check every 2 seconds
+
+      // Set a maximum timeout of 20 minutes for multi-symbol backtests
+      maxTimeoutRef.current = setTimeout(() => {
+        if (progressIntervalRef.current) {
+          clearInterval(progressIntervalRef.current)
+          progressIntervalRef.current = null
+        }
+        setIsRunning(false)
+        setBacktestPhase('Timeout')
+        setBacktestResult({
+          success: false,
+          error: 'Multi-symbol backtest is taking longer than expected. Please try with fewer symbols or a shorter time period.'
+        })
+      }, 1200000) // 20 minutes
+      
+    } catch (error) {
+      console.error('Multi-symbol backtest failed:', error)
+      
+      let errorMessage = 'Unknown error occurred'
+      if (error instanceof Error) {
+        if (error.message.includes('Failed to fetch')) {
+          errorMessage = 'Unable to connect to the backend server. Please ensure the backend is running on http://localhost:8000'
+        } else {
+          errorMessage = error.message
+        }
+      }
+      
+      setBacktestResult({
+        success: false,
+        error: errorMessage
+      })
+      setBacktestPhase('Error')
+      setIsRunning(false)
+    }
+  }
+
   // Handle clear logs dialog response
   const handleClearLogsDialog = (shouldClear: boolean) => {
     setShowClearLogsDialog(false)
     if (pendingBacktest) {
-      startBacktest(pendingBacktest.ticker, shouldClear)
+      if (pendingBacktest.ticker.includes(',')) {
+        // Multi-symbol backtest
+        const symbols = pendingBacktest.ticker.split(',')
+        startMultiSymbolBacktest(symbols, shouldClear)
+      } else {
+        // Single symbol backtest
+        startBacktest(pendingBacktest.ticker, shouldClear)
+      }
       setPendingBacktest(null)
     }
   }
@@ -296,11 +529,19 @@ export default function BacktestEngine() {
     const symbols = getSelectedSymbols()
     if (symbols.length === 0) return
 
-    if (backtestMode === 'momentum' && symbols.length === 1) {
-      await runMomentumBacktest(symbols[0])
+    if (backtestMode === 'momentum') {
+      if (backtestType === 'single') {
+        if (symbols.length === 1) {
+          await runMomentumBacktest(symbols[0])
+        } else {
+          alert('Single symbol mode requires exactly one symbol. Please select one symbol or switch to multi-symbol mode.')
+        }
+      } else {
+        // Multi-symbol backtesting
+        await runMultiSymbolBacktest(symbols)
+      }
     } else {
-      // Handle other backtest modes or multiple symbols
-      alert('Multi-symbol backtesting coming soon! For now, please select a single symbol for momentum backtesting.')
+      alert('Other backtest modes coming soon!')
     }
   }
 
@@ -364,7 +605,7 @@ export default function BacktestEngine() {
   const selectedSymbols = getSelectedSymbols()
 
   return (
-    <div className="p-6 space-y-6">
+    <div className={`p-6 space-y-6 ${isRunning ? 'pb-32' : ''}`}>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-white">Backtest Engine</h1>
@@ -375,7 +616,30 @@ export default function BacktestEngine() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Configuration */}
         <div className="card-glow p-6">
-          <h3 className="text-xl font-semibold text-white mb-4">Configuration</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-semibold text-white">Configuration</h3>
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${
+                backendStatus === 'connected' ? 'bg-green-500' : 
+                backendStatus === 'connecting' ? 'bg-yellow-500' : 'bg-red-500'
+              }`}></div>
+              <span className={`text-sm ${
+                backendStatus === 'connected' ? 'text-green-400' : 
+                backendStatus === 'connecting' ? 'text-yellow-400' : 'text-red-400'
+              }`}>
+                {backendStatus === 'connected' ? 'Backend Connected' : 
+                 backendStatus === 'connecting' ? 'Connecting...' : 'Backend Disconnected'}
+              </span>
+            </div>
+          </div>
+          
+          {backendStatus === 'disconnected' && (
+            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg mb-4">
+              <p className="text-red-300 text-sm">
+                ⚠️ Backend server is not running. Please start the backend server to run backtests.
+              </p>
+            </div>
+          )}
           
           <div className="space-y-4">
             <div>
@@ -490,9 +754,14 @@ export default function BacktestEngine() {
                       rows={3}
                       className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
                     />
-                    {backtestMode === 'momentum' && (
+                    {backtestMode === 'momentum' && backtestType === 'single' && (
                       <p className="text-xs text-yellow-400 mt-2">
-                        Note: Momentum backtesting currently supports single symbols only. Enter one symbol for best results.
+                        Note: Single symbol mode will show detailed charts and analysis.
+                      </p>
+                    )}
+                    {backtestMode === 'momentum' && backtestType === 'multi' && (
+                      <p className="text-xs text-green-400 mt-2">
+                        Note: Multi-symbol mode will test all symbols and provide combined results.
                       </p>
                     )}
                   </div>
@@ -524,22 +793,95 @@ export default function BacktestEngine() {
 
             <div>
               <label className="block text-sm font-medium text-muted-foreground mb-2">
-                Historical Data Period
+                Backtest Type
               </label>
               <div className="grid grid-cols-2 gap-2">
-                {periods.map((periodOption) => (
-                  <button
-                    key={periodOption.id}
-                    onClick={() => setPeriod(periodOption.id)}
-                    className={`p-3 rounded-lg text-left transition-all duration-200 ${
-                      period === periodOption.id
-                        ? 'bg-purple-500 text-white'
-                        : 'bg-card/50 text-muted-foreground hover:bg-card/70 hover:text-white'
-                    }`}
-                  >
-                    <div className="font-medium text-sm">{periodOption.name}</div>
-                  </button>
-                ))}
+                <button
+                  onClick={() => setBacktestType('single')}
+                  className={`p-3 rounded-lg text-left transition-all duration-200 ${
+                    backtestType === 'single'
+                      ? 'bg-purple-500 text-white'
+                      : 'bg-card/50 text-muted-foreground hover:bg-card/70 hover:text-white'
+                  }`}
+                >
+                  <div className="font-medium text-sm">Single Symbol</div>
+                  <div className="text-xs opacity-75">Test one symbol with charts</div>
+                </button>
+                <button
+                  onClick={() => setBacktestType('multi')}
+                  className={`p-3 rounded-lg text-left transition-all duration-200 ${
+                    backtestType === 'multi'
+                      ? 'bg-purple-500 text-white'
+                      : 'bg-card/50 text-muted-foreground hover:bg-card/70 hover:text-white'
+                  }`}
+                >
+                  <div className="font-medium text-sm">Multi-Symbol</div>
+                  <div className="text-xs opacity-75">Test multiple symbols with combined results</div>
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-muted-foreground mb-2">
+                Historical Data Period
+              </label>
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    id="preset-period"
+                    checked={!useCustomPeriod}
+                    onChange={() => setUseCustomPeriod(false)}
+                    className="text-purple-500"
+                  />
+                  <label htmlFor="preset-period" className="text-sm text-white">Preset Periods</label>
+                </div>
+                
+                {!useCustomPeriod && (
+                  <div className="grid grid-cols-2 gap-2">
+                    {periods.map((periodOption) => (
+                      <button
+                        key={periodOption.id}
+                        onClick={() => setPeriod(periodOption.id)}
+                        className={`p-3 rounded-lg text-left transition-all duration-200 ${
+                          period === periodOption.id
+                            ? 'bg-purple-500 text-white'
+                            : 'bg-card/50 text-muted-foreground hover:bg-card/70 hover:text-white'
+                        }`}
+                      >
+                        <div className="font-medium text-sm">{periodOption.name}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                
+                <div className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    id="custom-period"
+                    checked={useCustomPeriod}
+                    onChange={() => setUseCustomPeriod(true)}
+                    className="text-purple-500"
+                  />
+                  <label htmlFor="custom-period" className="text-sm text-white">Custom Period</label>
+                </div>
+                
+                {useCustomPeriod && (
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="number"
+                      value={customMonths}
+                      onChange={(e) => setCustomMonths(Number(e.target.value))}
+                      min={1}
+                      max={60}
+                      className="w-20 px-3 py-2 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white text-center"
+                    />
+                    <span className="text-sm text-muted-foreground">months back</span>
+                    <span className="text-xs text-purple-400">
+                      ({customMonths} month{customMonths !== 1 ? 's' : ''} of historical data)
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -646,18 +988,18 @@ export default function BacktestEngine() {
       <div className="flex justify-center">
         <button 
           onClick={runBacktest}
-          disabled={selectedSymbols.length === 0 || !selectedStrategy || isRunning}
+          disabled={selectedSymbols.length === 0 || !selectedStrategy || isRunning || backendStatus === 'disconnected'}
           className="flex items-center gap-3 px-8 py-4 bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed rounded-xl font-medium transition-all duration-200 shadow-lg hover:shadow-purple-500/25 text-lg"
         >
           {isRunning ? (
             <>
               <RefreshCw className="h-6 w-6 animate-spin" />
-              Running Backtest...
+              {backtestType === 'multi' ? 'Running Multi-Symbol Backtest...' : 'Running Backtest...'}
             </>
           ) : (
             <>
               <Play className="h-6 w-6" />
-              Run Backtest
+              {backtestType === 'multi' ? `Run Multi-Symbol Backtest (${selectedSymbols.length} symbols)` : 'Run Backtest'}
             </>
           )}
         </button>
@@ -718,71 +1060,76 @@ export default function BacktestEngine() {
             </div>
           </div>
 
-          {/* Visual Chart - Single Smooth 30-Day Scroller */}
-          {backtestResult.price_data && (
-            <Smooth30DayScroller
-              priceData={backtestResult.price_data}
-              trades={backtestResult.trades || []}
-              momentumPeriods={backtestResult.momentum_periods || []}
-              ticker={selectedTickerForBacktest}
+          {/* Multi-Symbol Results */}
+          {backtestType === 'multi' && selectedTickerForBacktest === 'Multi-Symbol Portfolio' ? (
+            <MultiSymbolResults
+              results={backtestResult}
+              initialCapital={initialCapital}
+              period={useCustomPeriod ? `${customMonths} months` : period}
             />
+          ) : (
+            /* Single Symbol Visual Chart */
+            backtestResult.price_data && (
+              <>
+                {/* Debug: Log the data being passed to the chart */}
+                {(() => {
+                  console.log('🏁 BACKTEST PAGE - EXTENSIVE DEBUG:')
+                  console.log('🏁 Raw backtestResult object:', JSON.stringify(backtestResult, null, 2))
+                  console.log('🏁 Price data length:', backtestResult.price_data?.length || 0)
+                  console.log('🏁 Trades length:', backtestResult.trades?.length || 0)
+                  console.log('🏁 Momentum periods length:', backtestResult.momentum_periods?.length || 0)
+                  
+                  console.log('🏁 FULL TRADES FROM BACKTEST RESULT:')
+                  if (backtestResult.trades && backtestResult.trades.length > 0) {
+                    backtestResult.trades.forEach((trade: any, index: number) => {
+                      console.log(`  Backtest Trade ${index}:`, JSON.stringify(trade, null, 2))
+                    })
+                  } else {
+                    console.log('  No trades in backtest result')
+                  }
+                  
+                  console.log('🏁 FULL MOMENTUM PERIODS FROM BACKTEST RESULT:')
+                  if (backtestResult.momentum_periods && backtestResult.momentum_periods.length > 0) {
+                    backtestResult.momentum_periods.forEach((period: any, index: number) => {
+                      console.log(`  Backtest Period ${index}:`, JSON.stringify(period, null, 2))
+                    })
+                  } else {
+                    console.log('  No momentum periods in backtest result')
+                  }
+                  
+                  return null
+                })()}
+                
+                <Smooth30DayScroller
+                  priceData={backtestResult.price_data}
+                  trades={backtestResult.trades || []}
+                  momentumPeriods={backtestResult.momentum_periods || []}
+                  ticker={selectedTickerForBacktest}
+                />
+              </>
+            )
           )}
 
-          {/* Performance Results */}
-          <BacktestResults
-            results={backtestResult.results}
-            trades={backtestResult.trades || []}
-            initialCapital={initialCapital}
-            ticker={selectedTickerForBacktest}
-            period={period}
-          />
+          {/* Performance Results - Only for single symbol */}
+          {backtestType === 'single' && (
+            <>
+              <BacktestResults
+                results={backtestResult.results}
+                trades={backtestResult.trades || []}
+                initialCapital={initialCapital}
+                ticker={selectedTickerForBacktest}
+                period={period}
+              />
 
-          {/* Trade Log */}
-          {backtestResult.trades && backtestResult.trades.length > 0 && (
-            <TradeLog
-              trades={backtestResult.trades}
-              ticker={selectedTickerForBacktest}
-            />
+              {/* Trade Log */}
+              {backtestResult.trades && backtestResult.trades.length > 0 && (
+                <TradeLog
+                  trades={backtestResult.trades}
+                  ticker={selectedTickerForBacktest}
+                />
+              )}
+            </>
           )}
-        </div>
-      )}
-
-      {/* Progress Bar Section */}
-      {isRunning && (
-        <div className="card-glow p-4 mb-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
-                <span className="text-sm font-medium text-white">Backtest in Progress</span>
-              </div>
-              <span className="text-sm text-gray-400">{currentTicker}</span>
-            </div>
-            <div className="text-sm text-gray-400">
-              {progress.toFixed(1)}% Complete
-            </div>
-          </div>
-          
-          {/* Progress Bar */}
-          <div className="w-full bg-gray-700 rounded-full h-3 mb-3">
-            <div 
-              className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out"
-              style={{ width: `${progress}%` }}
-            ></div>
-          </div>
-          
-          {/* Phase Display */}
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-gray-300">{backtestPhase}</span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIsLogConsoleOpen(!isLogConsoleOpen)}
-                className="text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
-              >
-                {isLogConsoleOpen ? 'Hide Logs' : 'Show Logs'}
-              </button>
-            </div>
-          </div>
         </div>
       )}
 
@@ -799,6 +1146,76 @@ export default function BacktestEngine() {
           phase: backtestPhase
         }}
       />
+
+      {/* Progress Bar Section - Always at bottom */}
+      {isRunning && (
+        <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur-sm border-t border-gray-700 z-40 p-4 shadow-lg">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                <span className="text-sm font-medium text-white">Backtest in Progress</span>
+              </div>
+              <span className="text-sm text-gray-400">{currentTicker}</span>
+            </div>
+            <div className="text-sm text-gray-400">
+              {progress.toFixed(1)}% Complete
+            </div>
+          </div>
+          
+          {/* Progress Bars */}
+          {backtestType === 'multi' ? (
+            <div className="space-y-3">
+              {/* Symbols progress */}
+              <div>
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>Symbols</span>
+                  <span>{symbolsCompleted}/{symbolsTotal}</span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-3">
+                  <div
+                    className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out"
+                    style={{ width: `${symbolsTotal ? (symbolsCompleted / symbolsTotal) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+              {/* Candle progress */}
+              <div>
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>Candles</span>
+                  <span>{candleProgress}%</span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2">
+                  <div
+                    className="bg-gradient-to-r from-green-500 to-emerald-500 h-2 rounded-full transition-all duration-300 ease-out"
+                    style={{ width: `${candleProgress}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="w-full bg-gray-700 rounded-full h-3 mb-3">
+              <div 
+                className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out"
+                style={{ width: `${progress}%` }}
+              ></div>
+            </div>
+          )}
+          
+          {/* Phase Display */}
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-300">{backtestPhase}</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsLogConsoleOpen(!isLogConsoleOpen)}
+                className="text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+              >
+                {isLogConsoleOpen ? 'Hide Logs' : 'Show Logs'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Clear Logs Confirmation Dialog */}
       {showClearLogsDialog && (

@@ -60,12 +60,25 @@ except ImportError as e:
 def fetch_ohlcv(symbol: str, period_str: str) -> pd.DataFrame:
     """Fetch OHLCV data using yfinance with enhanced data preparation"""
     try:
+        print(f"🔍 DEBUG fetch_ohlcv: symbol={symbol}, period_str={period_str}")
+        
+        print(f"🔧 DEBUG fetch_ohlcv: Creating yf.Ticker({symbol})")
         ticker = yf.Ticker(symbol)
+        
+        print(f"🔧 DEBUG fetch_ohlcv: Calling ticker.history(period={period_str})")
         data = ticker.history(period=period_str)
+        
+        print(f"🔧 DEBUG fetch_ohlcv: Raw data shape: {data.shape if not data.empty else 'EMPTY'}")
+        
         if data.empty:
+            print(f"❌ DEBUG fetch_ohlcv: Data is empty, returning empty DataFrame")
             return pd.DataFrame()
         
+        print(f"🔧 DEBUG fetch_ohlcv: Raw data columns: {list(data.columns)}")
+        print(f"🔧 DEBUG fetch_ohlcv: Raw data date range: {data.index[0]} to {data.index[-1]}")
+        
         # Prepare data with all required fields for momentum screening
+        print(f"🔧 DEBUG fetch_ohlcv: Preparing enhanced data...")
         data = data.copy()
         data['SMA10'] = data['Close'].rolling(window=10).mean()
         data['SMA20'] = data['Close'].rolling(window=20).mean()
@@ -78,10 +91,15 @@ def fetch_ohlcv(symbol: str, period_str: str) -> pd.DataFrame:
         data['body_size_pct'] = abs(data['Close'] - data['Open']) / data['Open'] * 100
         data['volume_sma'] = data['Volume'].rolling(window=50).mean()
         
+        print(f"✅ DEBUG fetch_ohlcv: Successfully prepared {len(data)} rows with {len(data.columns)} columns")
+        print(f"🔧 DEBUG fetch_ohlcv: Final columns: {list(data.columns)}")
+        
         return data
         
     except Exception as e:
-        print(f"Error fetching data for {symbol}: {e}")
+        print(f"❌ DEBUG fetch_ohlcv: Exception for {symbol}: {type(e).__name__}: {str(e)}")
+        import traceback
+        print(f"❌ DEBUG fetch_ohlcv: Full traceback: {traceback.format_exc()}")
         return pd.DataFrame()
 
 # Define data structures for trade tracking and state management
@@ -236,18 +254,39 @@ class EnhancedMomentumBacktester:
     async def fetch_data(self) -> bool:
         """Fetch and prepare data for backtesting"""
         try:
+            print(f"🔍 DEBUG EnhancedMomentumBacktester.fetch_data: Starting for {self.ticker} ({self.period})")
             log_info(f"Fetching data for {self.ticker} ({self.period})", {"ticker": self.ticker, "period": self.period}, "backtest")
             await asyncio.sleep(0)  # Yield control to event loop
             
+            print(f"🔧 DEBUG EnhancedMomentumBacktester.fetch_data: About to call fetch_ohlcv({self.ticker}, {self.period})")
             self.daily_data = fetch_ohlcv(self.ticker, self.period)
+            print(f"🔧 DEBUG EnhancedMomentumBacktester.fetch_data: fetch_ohlcv returned data with type {type(self.daily_data)}")
             
-            if self.daily_data is None or len(self.daily_data) < 100:
-                log_error(f"Insufficient data: {len(self.daily_data) if self.daily_data is not None else 0} days", {"ticker": self.ticker}, "backtest")
+            if self.daily_data is None:
+                print(f"❌ DEBUG EnhancedMomentumBacktester.fetch_data: daily_data is None")
+                log_error(f"daily_data is None", {"ticker": self.ticker}, "backtest")
                 return False
+            elif isinstance(self.daily_data, pd.DataFrame) and self.daily_data.empty:
+                print(f"❌ DEBUG EnhancedMomentumBacktester.fetch_data: daily_data is empty DataFrame")
+                log_error(f"daily_data is empty DataFrame", {"ticker": self.ticker}, "backtest")
+                return False
+            else:
+                min_required_days = 60  # Need enough for SMA50/ADR20 + simulation start at 50
+                if len(self.daily_data) < min_required_days:
+                    print(f"❌ DEBUG EnhancedMomentumBacktester.fetch_data: Insufficient data: {len(self.daily_data)} days (need {min_required_days}+)\n"
+                          f"Tip: Increase period or lower this threshold if needed.")
+                    log_error(
+                        f"Insufficient data: have {len(self.daily_data)} days; need {min_required_days}+",
+                        {"ticker": self.ticker, "have_days": len(self.daily_data), "need_days": min_required_days},
+                        "backtest"
+                    )
+                    return False
             
+            print(f"✅ DEBUG EnhancedMomentumBacktester.fetch_data: Successfully got {len(self.daily_data)} days of data")
             log_info(f"Fetched {len(self.daily_data)} days of data", {"ticker": self.ticker, "days": len(self.daily_data)}, "backtest")
             await asyncio.sleep(0)  # Yield control to event loop
             
+            print(f"🔧 DEBUG EnhancedMomentumBacktester.fetch_data: Date range: {self.daily_data.index[0].date()} to {self.daily_data.index[-1].date()}")
             log_info(f"Date range: {self.daily_data.index[0].date()} to {self.daily_data.index[-1].date()}", {
                 "ticker": self.ticker,
                 "start_date": self.daily_data.index[0].date().isoformat(),
@@ -257,6 +296,9 @@ class EnhancedMomentumBacktester:
             return True
             
         except Exception as e:
+            print(f"❌ DEBUG EnhancedMomentumBacktester.fetch_data: Exception: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"❌ DEBUG EnhancedMomentumBacktester.fetch_data: Full traceback: {traceback.format_exc()}")
             log_error(f"Error fetching data: {e}", {"ticker": self.ticker, "error": str(e)}, "backtest")
             return False
     
@@ -670,8 +712,8 @@ class EnhancedMomentumBacktester:
         }, "backtest")
         await asyncio.sleep(0)  # Yield control to event loop
         
-        # Start simulation from day 50 to have sufficient lookback data
-        start_idx = 50
+        # Start simulation from day ~30-50 to have sufficient lookback data but adapt to short periods
+        start_idx = max(30, min(50, len(self.daily_data) // 3))
         total_days = len(self.daily_data)
         
         for current_idx in range(start_idx, total_days):
