@@ -387,7 +387,7 @@ export default function LogConsole({ isOpen, onClose, className = '', height = 2
           log.module.toLowerCase().includes('backtest') ||
           log.module.toLowerCase().includes('momentum') ||
           log.module.toLowerCase().includes('strategy')
-        ))
+        )) || false
       showLog = isBacktestRelated
     }
     

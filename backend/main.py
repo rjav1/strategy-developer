@@ -59,11 +59,7 @@ def load_builtin_strategies():
     """Load built-in strategies"""
     try:
         # Import the breakout strategy
-        import sys
-        import os
-        sys.path.append(os.path.join(os.path.dirname(__file__), 'strategies'))
-        
-        from breakout_strategy import get_strategy_info
+        from strategies.breakout_strategy import get_strategy_info
         
         strategy_info = get_strategy_info()
         strategy_id = "breakout_strategy"
