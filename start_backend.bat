@@ -12,4 +12,4 @@ echo Backend running on: http://localhost:8000
 echo.
 echo Press Ctrl+C to stop the server
 echo =======================================
-python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.factory:create_app --reload --host 0.0.0.0 --port 8000

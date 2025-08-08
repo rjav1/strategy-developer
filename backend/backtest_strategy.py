@@ -41,12 +41,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import production momentum screener functions
 try:
-    from main import (
-        check_momentum_pattern, 
-        detect_momentum_move_boundaries, 
-        detect_consolidation_pattern_new,
-        calculate_atr
+    from services.momentum import (
+        check_momentum_pattern,
+        detect_momentum_move_boundaries,
+        calculate_atr,
     )
+    from services.consolidation import detect_consolidation_pattern_new
     PRODUCTION_SCREENER_AVAILABLE = True
     print("✅ Production screener functions loaded successfully")
 except ImportError as e:

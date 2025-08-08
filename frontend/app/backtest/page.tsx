@@ -1,10 +1,9 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Play, Settings, BarChart3, Clock, Target, Bookmark, Plus, X, TrendingUp, Download, RefreshCw, Terminal, Trash2 } from 'lucide-react'
+import { Play, Settings, BarChart3, Clock, Target, Bookmark, Plus, X, TrendingUp, Download, RefreshCw, Trash2 } from 'lucide-react'
 import BacktestResults from '../../components/BacktestResults'
 import TradeLog from '../../components/TradeLog'
-import LogConsole from '../../components/LogConsole'
 import Smooth30DayScroller from '../../components/Smooth30DayScroller'
 import MultiSymbolResults from '../../components/MultiSymbolResults'
 import { useWatchlist } from '../providers/WatchlistProvider'
@@ -69,9 +68,7 @@ export default function BacktestEngine() {
   const [showClearLogsDialog, setShowClearLogsDialog] = useState(false)
   const [pendingBacktest, setPendingBacktest] = useState<{ticker: string, shouldClear: boolean} | null>(null)
   
-  // Log console state
-  const [isLogConsoleOpen, setIsLogConsoleOpen] = useState(false)
-  const [logsHeight, setLogsHeight] = useState(256) // Default height in pixels
+  // Logs are now emitted to browser console only; no in-UI console
   
   // Backend connection state
   const [backendStatus, setBackendStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
@@ -246,7 +243,7 @@ export default function BacktestEngine() {
     setBacktestResult(null)
     setSelectedTickerForBacktest(ticker)
     setBacktestPhase('Starting...')
-    setIsLogConsoleOpen(true) // Automatically show logs when backtest starts
+    // setIsLogConsoleOpen(true) // Automatically show logs when backtest starts
 
     // Clear logs only if user confirmed
     if (shouldClearLogs) {
@@ -393,7 +390,7 @@ export default function BacktestEngine() {
     setBacktestResult(null)
     setSelectedTickerForBacktest('')
     setBacktestPhase('Starting multi-symbol backtest...')
-    setIsLogConsoleOpen(true)
+    // setIsLogConsoleOpen(true)
     setLiveResults(null) // Clear any previous live results
 
     // Clear logs only if user confirmed
@@ -1039,26 +1036,13 @@ export default function BacktestEngine() {
 
       {/* Log Console Toggle */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          {isRunning && (
+        {isRunning && (
             <div className="flex items-center gap-2 text-sm">
               <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-500"></div>
               <span className="text-muted-foreground">Testing {currentTicker}...</span>
             </div>
           )}
-        </div>
-        
-        <button
-          onClick={() => setIsLogConsoleOpen(!isLogConsoleOpen)}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-            isLogConsoleOpen 
-              ? 'bg-purple-600 text-white' 
-              : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-          }`}
-        >
-          <Terminal className="w-4 h-4" />
-          {isLogConsoleOpen ? 'Hide Logs' : 'Show Live Logs'}
-        </button>
+        {/* Logs button removed */}
       </div>
 
       {/* Error Display */}
@@ -1106,13 +1090,13 @@ export default function BacktestEngine() {
             />
           ) : (
             /* Single Symbol Visual Chart */
-            backtestResult.price_data && (
+            backtestResult && backtestResult.price_data && (
               <>
                 {/* Debug logs elided */}
                 <Smooth30DayScroller
-                  priceData={backtestResult.price_data}
-                  trades={backtestResult.trades || []}
-                  momentumPeriods={backtestResult.momentum_periods || []}
+                  priceData={backtestResult?.price_data}
+                  trades={backtestResult?.trades || []}
+                  momentumPeriods={backtestResult?.momentum_periods || []}
                   ticker={selectedTickerForBacktest}
                 />
               </>
@@ -1123,17 +1107,17 @@ export default function BacktestEngine() {
           {backtestType === 'single' && (
             <>
               <BacktestResults
-                results={backtestResult.results}
-                trades={backtestResult.trades || []}
+                results={backtestResult?.results as any}
+                trades={backtestResult?.trades || []}
                 initialCapital={initialCapital}
                 ticker={selectedTickerForBacktest}
                 period={period}
               />
 
               {/* Trade Log */}
-              {backtestResult.trades && backtestResult.trades.length > 0 && (
+              {backtestResult?.trades && backtestResult.trades.length > 0 && (
                 <TradeLog
-                  trades={backtestResult.trades}
+                  trades={backtestResult?.trades}
                   ticker={selectedTickerForBacktest}
                 />
               )}
@@ -1142,19 +1126,7 @@ export default function BacktestEngine() {
         </div>
        )}
 
-      {/* Log Console */}
-      <LogConsole 
-        isOpen={isLogConsoleOpen} 
-        onClose={() => setIsLogConsoleOpen(false)}
-        height={logsHeight}
-        onHeightChange={setLogsHeight}
-        backtestStatus={{
-          isRunning,
-          progress,
-          currentTicker,
-          phase: backtestPhase
-        }}
-      />
+      {/* Log console removed; logs are printed to console */}
 
       {/* Progress Bar Section - Always at bottom */}
       {isRunning && backtestType !== 'multi' && (
@@ -1183,14 +1155,7 @@ export default function BacktestEngine() {
           {/* Phase Display */}
           <div className="flex items-center justify-between">
             <span className="text-sm text-gray-300">{backtestPhase}</span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIsLogConsoleOpen(!isLogConsoleOpen)}
-                className="text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
-              >
-                {isLogConsoleOpen ? 'Hide Logs' : 'Show Logs'}
-              </button>
-            </div>
+            {/* Logs toggle removed */}
           </div>
         </div>
       )}
