@@ -7,6 +7,7 @@ import TradeLog from '../../components/TradeLog'
 import LogConsole from '../../components/LogConsole'
 import Smooth30DayScroller from '../../components/Smooth30DayScroller'
 import MultiSymbolResults from '../../components/MultiSymbolResults'
+import { useWatchlist } from '../providers/WatchlistProvider'
 
 interface BacktestResult {
   success: boolean
@@ -35,6 +36,8 @@ export default function BacktestEngine() {
   const [selectedStrategy, setSelectedStrategy] = useState('momentum_screener')
   const [selectedData, setSelectedData] = useState('')
   const [backtestMode, setBacktestMode] = useState('momentum')
+  // Use synced watchlists from provider instead of localStorage
+  const { watchlists: providerWatchlists, refreshWatchlists } = useWatchlist() as any
   const [watchlists, setWatchlists] = useState<any[]>([])
   const [selectedWatchlist, setSelectedWatchlist] = useState<string>('')
   const [customSymbols, setCustomSymbols] = useState('ALAB')
@@ -60,6 +63,7 @@ export default function BacktestEngine() {
   const [useCustomPeriod, setUseCustomPeriod] = useState(false)
   const [backtestType, setBacktestType] = useState<'single' | 'multi'>('single')
   const [selectedTickerForBacktest, setSelectedTickerForBacktest] = useState('')
+  const [liveResults, setLiveResults] = useState<any>(null)
   const [backtestPhase, setBacktestPhase] = useState<string>('')
   const [jobId, setJobId] = useState<string>('')
   const [showClearLogsDialog, setShowClearLogsDialog] = useState(false)
@@ -110,13 +114,20 @@ export default function BacktestEngine() {
     { id: '5y', name: '5 Years' }
   ]
 
-  // Load watchlists from localStorage
+  // Sync watchlists from provider; fallback to localStorage once
   useEffect(() => {
+    if (providerWatchlists && providerWatchlists.length > 0) {
+      setWatchlists(providerWatchlists)
+      return
+    }
     const savedWatchlists = localStorage.getItem('watchlists')
     if (savedWatchlists) {
       setWatchlists(JSON.parse(savedWatchlists))
+    } else {
+      // Try fetching once from provider if empty
+      refreshWatchlists?.().catch(() => {})
     }
-  }, [])
+  }, [providerWatchlists])
 
   // Load strategies from backend
   useEffect(() => {
@@ -383,6 +394,7 @@ export default function BacktestEngine() {
     setSelectedTickerForBacktest('')
     setBacktestPhase('Starting multi-symbol backtest...')
     setIsLogConsoleOpen(true)
+    setLiveResults(null) // Clear any previous live results
 
     // Clear logs only if user confirmed
     if (shouldClearLogs) {
@@ -435,6 +447,11 @@ export default function BacktestEngine() {
               setSymbolsTotal(progressData.symbols_total || symbols.length)
               setCandleProgress(progressData.candle_progress || 0)
               setCandleTotal(progressData.candle_total || 100)
+              
+              // Update live results if available
+              if (progressData.live_results) {
+                setLiveResults(progressData.live_results)
+              }
             }
             
             // Update phase and current ticker message
@@ -443,21 +460,29 @@ export default function BacktestEngine() {
               setCurrentTicker(progressData.current_symbol || `Multi-symbol: ${progressData.message}`)
             }
             
-            // Check if completed
-            if (progressData.status === 'completed' && progressData.results) {
-              if (progressIntervalRef.current) {
-                clearInterval(progressIntervalRef.current)
-                progressIntervalRef.current = null
+                          // Stop as soon as backend reports completion
+              if (progressData.status === 'completed') {
+                if (progressIntervalRef.current) {
+                  clearInterval(progressIntervalRef.current)
+                  progressIntervalRef.current = null
+                }
+                if (maxTimeoutRef.current) {
+                  clearTimeout(maxTimeoutRef.current)
+                  maxTimeoutRef.current = null
+                }
+
+                console.log('🚀 Multi-symbol backtest completed:', progressData)
+
+                // Prefer compact combined results if present
+                const combined = progressData.results || progressData.combined_results || progressData
+                setBacktestResult(combined)
+                setSelectedTickerForBacktest('Multi-Symbol Portfolio')
+                setProgress(100)
+                setBacktestPhase('Completed')
+                setIsRunning(false)
+                setLiveResults(null) // Clear live results when completed
+                return
               }
-              
-              console.log('🚀 Multi-symbol backtest completed:', progressData.results)
-              
-              setBacktestResult(progressData.results)
-              setSelectedTickerForBacktest('Multi-Symbol Portfolio')
-              setProgress(100)
-              setBacktestPhase('Completed')
-              setIsRunning(false)
-            }
             
             // Check if error
             if (progressData.status === 'error') {
@@ -473,19 +498,11 @@ export default function BacktestEngine() {
         }
       }, 2000) // Check every 2 seconds
 
-      // Set a maximum timeout of 20 minutes for multi-symbol backtests
-      maxTimeoutRef.current = setTimeout(() => {
-        if (progressIntervalRef.current) {
-          clearInterval(progressIntervalRef.current)
-          progressIntervalRef.current = null
-        }
-        setIsRunning(false)
-        setBacktestPhase('Timeout')
-        setBacktestResult({
-          success: false,
-          error: 'Multi-symbol backtest is taking longer than expected. Please try with fewer symbols or a shorter time period.'
-        })
-      }, 1200000) // 20 minutes
+      // Optional: previously enforced a 20-minute timeout, now disabled per user request.
+      if (maxTimeoutRef.current) {
+        clearTimeout(maxTimeoutRef.current)
+        maxTimeoutRef.current = null
+      }
       
     } catch (error) {
       console.error('Multi-symbol backtest failed:', error)
@@ -526,8 +543,15 @@ export default function BacktestEngine() {
 
   // Run backtest for selected symbols
   const runBacktest = async () => {
-    const symbols = getSelectedSymbols()
-    if (symbols.length === 0) return
+      const symbols = getSelectedSymbols()
+  if (symbols.length === 0) {
+    // If data source is watchlist and none loaded yet, try refresh once
+    if (dataSource === 'watchlist') {
+      await refreshWatchlists?.()
+      setWatchlists((providerWatchlists as any) || [])
+    }
+  }
+  if (symbols.length === 0) return
 
     if (backtestMode === 'momentum') {
       if (backtestType === 'single') {
@@ -714,22 +738,30 @@ export default function BacktestEngine() {
                     <label className="block text-sm font-medium text-muted-foreground mb-2">
                       Select Watchlist
                     </label>
-                    {watchlists.length === 0 ? (
+                                         {watchlists.length === 0 ? (
                       <div className="p-4 bg-gray-800/50 rounded-lg text-center">
                         <Bookmark className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
                         <p className="text-muted-foreground text-sm mb-3">No watchlists found</p>
-                        <button
-                          onClick={() => window.location.href = '/watchlists'}
-                          className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition-colors text-sm"
-                        >
-                          Create Watchlist
-                        </button>
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            onClick={() => refreshWatchlists?.()}
+                            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors text-sm"
+                          >
+                            Refresh
+                          </button>
+                          <button
+                            onClick={() => window.location.href = '/watchlists'}
+                            className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition-colors text-sm"
+                          >
+                            Create Watchlist
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <select 
                         value={selectedWatchlist}
                         onChange={(e) => setSelectedWatchlist(e.target.value)}
-                        className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
+                        className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-xl focus:ring-2 focus:ring-purple-500 focus-border-transparent text-white"
                       >
                         <option value="">Select a watchlist</option>
                         {watchlists.map((watchlist) => (
@@ -1038,10 +1070,10 @@ export default function BacktestEngine() {
       )}
 
       {/* Results Section */}
-      {backtestResult && backtestResult.success && backtestResult.results && (
+      {(backtestType === 'multi' || (backtestResult && backtestResult.success && backtestResult.results)) && (
         <div className="space-y-8">
           <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-bold text-white">Backtest Complete</h2>
+            <h2 className="text-2xl font-bold text-white">{isRunning && backtestType === 'multi' ? 'Backtest Running' : 'Backtest Complete'}</h2>
             <div className="flex items-center gap-2">
               <button 
                 onClick={exportResults}
@@ -1059,47 +1091,24 @@ export default function BacktestEngine() {
               </button>
             </div>
           </div>
-
-          {/* Multi-Symbol Results */}
-          {backtestType === 'multi' && selectedTickerForBacktest === 'Multi-Symbol Portfolio' ? (
+  
+          {/* Multi-Symbol Results always visible during multi mode */}
+          {backtestType === 'multi' ? (
             <MultiSymbolResults
-              results={backtestResult}
+              results={liveResults || backtestResult}
               initialCapital={initialCapital}
               period={useCustomPeriod ? `${customMonths} months` : period}
+              isRunning={isRunning}
+              progress={progress}
+              symbolsCompleted={symbolsCompleted}
+              symbolsTotal={symbolsTotal}
+              candleProgress={candleProgress}
             />
           ) : (
             /* Single Symbol Visual Chart */
             backtestResult.price_data && (
               <>
-                {/* Debug: Log the data being passed to the chart */}
-                {(() => {
-                  console.log('🏁 BACKTEST PAGE - EXTENSIVE DEBUG:')
-                  console.log('🏁 Raw backtestResult object:', JSON.stringify(backtestResult, null, 2))
-                  console.log('🏁 Price data length:', backtestResult.price_data?.length || 0)
-                  console.log('🏁 Trades length:', backtestResult.trades?.length || 0)
-                  console.log('🏁 Momentum periods length:', backtestResult.momentum_periods?.length || 0)
-                  
-                  console.log('🏁 FULL TRADES FROM BACKTEST RESULT:')
-                  if (backtestResult.trades && backtestResult.trades.length > 0) {
-                    backtestResult.trades.forEach((trade: any, index: number) => {
-                      console.log(`  Backtest Trade ${index}:`, JSON.stringify(trade, null, 2))
-                    })
-                  } else {
-                    console.log('  No trades in backtest result')
-                  }
-                  
-                  console.log('🏁 FULL MOMENTUM PERIODS FROM BACKTEST RESULT:')
-                  if (backtestResult.momentum_periods && backtestResult.momentum_periods.length > 0) {
-                    backtestResult.momentum_periods.forEach((period: any, index: number) => {
-                      console.log(`  Backtest Period ${index}:`, JSON.stringify(period, null, 2))
-                    })
-                  } else {
-                    console.log('  No momentum periods in backtest result')
-                  }
-                  
-                  return null
-                })()}
-                
+                {/* Debug logs elided */}
                 <Smooth30DayScroller
                   priceData={backtestResult.price_data}
                   trades={backtestResult.trades || []}
@@ -1131,7 +1140,7 @@ export default function BacktestEngine() {
             </>
           )}
         </div>
-      )}
+       )}
 
       {/* Log Console */}
       <LogConsole 
@@ -1148,7 +1157,7 @@ export default function BacktestEngine() {
       />
 
       {/* Progress Bar Section - Always at bottom */}
-      {isRunning && (
+      {isRunning && backtestType !== 'multi' && (
         <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur-sm border-t border-gray-700 z-40 p-4 shadow-lg">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
@@ -1164,43 +1173,12 @@ export default function BacktestEngine() {
           </div>
           
           {/* Progress Bars */}
-          {backtestType === 'multi' ? (
-            <div className="space-y-3">
-              {/* Symbols progress */}
-              <div>
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <span>Symbols</span>
-                  <span>{symbolsCompleted}/{symbolsTotal}</span>
-                </div>
-                <div className="w-full bg-gray-700 rounded-full h-3">
-                  <div
-                    className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out"
-                    style={{ width: `${symbolsTotal ? (symbolsCompleted / symbolsTotal) * 100 : 0}%` }}
-                  />
-                </div>
-              </div>
-              {/* Candle progress */}
-              <div>
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <span>Candles</span>
-                  <span>{candleProgress}%</span>
-                </div>
-                <div className="w-full bg-gray-700 rounded-full h-2">
-                  <div
-                    className="bg-gradient-to-r from-green-500 to-emerald-500 h-2 rounded-full transition-all duration-300 ease-out"
-                    style={{ width: `${candleProgress}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="w-full bg-gray-700 rounded-full h-3 mb-3">
-              <div 
-                className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out"
-                style={{ width: `${progress}%` }}
-              ></div>
-            </div>
-          )}
+          <div className="w-full bg-gray-700 rounded-full h-3 mb-3">
+            <div 
+              className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out"
+              style={{ width: `${progress}%` }}
+            ></div>
+          </div>
           
           {/* Phase Display */}
           <div className="flex items-center justify-between">

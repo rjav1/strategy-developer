@@ -1156,37 +1156,37 @@ export default function Smooth30DayScroller({
         {/* Legend */}
         <div className="mb-4 flex items-center justify-between">
           <div className="flex items-center gap-6 text-xs text-gray-400">
-            <div className="flex items-center gap-1">
-              <div className="w-3 h-3 bg-red-500/30 border border-red-500/50"></div>
-              <span>Momentum</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-3 h-3 bg-yellow-500/30 border border-yellow-500/50"></div>
-              <span>Consolidation</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-3 h-3 bg-green-500/30 border border-green-500/50"></div>
-              <span>In Position</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-b-[8px] border-l-transparent border-r-transparent border-b-green-500"></div>
-              <span>Buy</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-red-500"></div>
-              <span>Sell</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-4 h-0.5 bg-blue-500"></div>
-              <span>SMA10</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-4 h-0.5 bg-orange-500"></div>
-              <span>SMA20</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-4 h-0.5 bg-red-500"></div>
-              <span>SMA50</span>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 bg-red-500/30 border border-red-500/50"></div>
+            <span>Momentum</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 bg-yellow-500/30 border border-yellow-500/50"></div>
+            <span>Consolidation</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 bg-green-500/30 border border-green-500/50"></div>
+            <span>In Position</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-b-[8px] border-l-transparent border-r-transparent border-b-green-500"></div>
+            <span>Buy</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-red-500"></div>
+            <span>Sell</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0.5 bg-blue-500"></div>
+            <span>SMA10</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0.5 bg-orange-500"></div>
+            <span>SMA20</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0.5 bg-red-500"></div>
+            <span>SMA50</span>
             </div>
           </div>
           

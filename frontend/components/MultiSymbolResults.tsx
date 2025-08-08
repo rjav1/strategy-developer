@@ -7,9 +7,14 @@ interface MultiSymbolResultsProps {
   results: any
   initialCapital: number
   period: string
+  isRunning?: boolean
+  progress?: number
+  symbolsCompleted?: number
+  symbolsTotal?: number
+  candleProgress?: number
 }
 
-export default function MultiSymbolResults({ results, initialCapital, period }: MultiSymbolResultsProps) {
+export default function MultiSymbolResults({ results, initialCapital, period, isRunning = false, progress = 0, symbolsCompleted = 0, symbolsTotal = 0, candleProgress = 0 }: MultiSymbolResultsProps) {
   const [expandedSections, setExpandedSections] = useState({
     portfolio: true,
     breakdown: false,
@@ -23,7 +28,7 @@ export default function MultiSymbolResults({ results, initialCapital, period }: 
     }))
   }
 
-  if (!results?.success) {
+  if (!isRunning && !results?.success) {
     return (
       <div className="card-glow p-6">
         <div className="text-center">
@@ -35,10 +40,12 @@ export default function MultiSymbolResults({ results, initialCapital, period }: 
     )
   }
 
-  const metrics = results.results || {}
-  const individual = results.individual_breakdown || {}
-  const symbolsPassed = results.symbols_passed || []
-  const symbolsFailed = results.symbols_failed || []
+  // Coalesce results to an empty object while running or before first payload arrives
+  const safe = results || {}
+  const metrics = (safe && safe.results) ? safe.results : {}
+  const individual = safe.individual_breakdown || {}
+  const symbolsPassed = safe.symbols_passed || []
+  const symbolsFailed = safe.symbols_failed || []
 
   // Portfolio Summary Cards
   const portfolioCards = [
@@ -80,6 +87,38 @@ export default function MultiSymbolResults({ results, initialCapital, period }: 
     <div className="space-y-6">
       {/* Portfolio Overview */}
       <div className="card-glow p-6">
+        {/* Embedded progress section (visible while running) */}
+        {isRunning && (
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                <span className="text-sm font-medium text-white">Backtest in Progress</span>
+              </div>
+              <div className="text-sm text-gray-400">{progress?.toFixed(1)}% Complete</div>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>Symbols</span>
+                  <span>{symbolsCompleted}/{symbolsTotal}</span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-3">
+                  <div className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out" style={{ width: `${symbolsTotal ? (symbolsCompleted / symbolsTotal) * 100 : 0}%` }} />
+                </div>
+              </div>
+              <div>
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>Candles</span>
+                  <span>{candleProgress}%</span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2">
+                  <div className="bg-gradient-to-r from-green-500 to-emerald-500 h-2 rounded-full transition-all duration-300 ease-out" style={{ width: `${candleProgress}%` }} />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-purple-500/20 rounded-lg">

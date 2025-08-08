@@ -3057,21 +3057,40 @@ async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str,
                         individual_results[symbol] = results
                         continue
                     
-                    # Convert results to JSON-serializable format (same as working backtest)
-                    results = make_json_serializable(results)
-                    
-                    individual_results[symbol] = results
+                    # Build a compact per-symbol summary to keep payload small
+                    compact_result = {
+                        "success": True,
+                        "results": results.get("results", {}),
+                        "error": results.get("error")
+                    }
+                    individual_results[symbol] = make_json_serializable(compact_result)
                     all_symbols_tested.append(symbol)
                     
-                    # Add trades to combined list
-                    if results.get("trades"):
-                        print(f"📈 Found {len(results['trades'])} trades for {symbol}")
-                        for trade in results["trades"]:
-                            trade_copy = trade.copy()
-                            trade_copy["symbol"] = symbol
-                            all_trades.append(trade_copy)
+                    # Accumulate trades for combined metrics calculation
+                    symbol_trades = results.get("trades", [])
+                    if isinstance(symbol_trades, list) and symbol_trades:
+                        # Add symbol identifier to each trade for tracking
+                        for trade in symbol_trades:
+                            trade["symbol"] = symbol
+                        all_trades.extend(symbol_trades)
+                        print(f"📈 Found {len(symbol_trades)} trades for {symbol} (added to global payload)")
                     else:
                         print(f"📉 No trades found for {symbol}")
+                    
+                    # Calculate live combined metrics after each symbol
+                    live_combined = calculate_combined_metrics(individual_results, all_trades, total_initial_capital, all_symbols_tested, strip_trades=True)
+                    
+                    # Update progress with live results
+                    backtest_results[job_id].update({
+                        "progress": round(((i + 1) / total_symbols) * 100, 1),
+                        "message": f"Completed {symbol}... ({i+1}/{total_symbols})",
+                        "current_symbol": symbol,
+                        "symbols_completed": i + 1,
+                        "symbols_total": total_symbols,
+                        "candle_progress": 100,
+                        "candle_total": 100,
+                        "live_results": live_combined  # Add live cumulative results
+                    })
                         
                     print(f"✅ {symbol} processing completed successfully")
                     
@@ -3094,7 +3113,7 @@ async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str,
                 }
         
         # Calculate combined metrics
-        combined_results = calculate_combined_metrics(individual_results, all_trades, total_initial_capital, all_symbols_tested)
+        combined_results = calculate_combined_metrics(individual_results, all_trades, total_initial_capital, all_symbols_tested, strip_trades=True)
         
         # Update job with final results (sanitize payload to avoid NaN/Inf)
         final_payload = {
@@ -3124,8 +3143,10 @@ async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str,
             "message": f"Multi-symbol backtest failed: {str(e)}"
         })
 
-def calculate_combined_metrics(individual_results: dict, all_trades: list, total_initial_capital: float, symbols_tested: list):
-    """Calculate combined performance metrics across all symbols"""
+def calculate_combined_metrics(individual_results: dict, all_trades: list, total_initial_capital: float, symbols_tested: list, strip_trades: bool = False):
+    """Calculate combined performance metrics across all symbols.
+    If strip_trades=True, omit the heavy trades array from the result to keep payload small.
+    """
     
     successful_results = {k: v for k, v in individual_results.items() if v.get("success", False)}
     
@@ -3169,7 +3190,7 @@ def calculate_combined_metrics(individual_results: dict, all_trades: list, total
     best_symbol = max(symbol_performance.items(), key=lambda x: x[1]) if symbol_performance else ("N/A", 0)
     worst_symbol = min(symbol_performance.items(), key=lambda x: x[1]) if symbol_performance else ("N/A", 0)
     
-    return {
+    compact = {
         "success": True,
         "results": {
             "total_trades": total_trades,
@@ -3192,12 +3213,16 @@ def calculate_combined_metrics(individual_results: dict, all_trades: list, total
             "total_initial_capital": total_initial_capital,
             "avg_return_per_symbol": round(total_return_pct / len(successful_results), 2) if successful_results else 0
         },
-        "trades": all_trades,
-        "individual_breakdown": individual_results,
         "symbols_tested": symbols_tested,
         "symbols_passed": list(successful_results.keys()),
         "symbols_failed": [k for k, v in individual_results.items() if not v.get("success", False)]
     }
+    if strip_trades:
+        return compact
+    else:
+        compact["trades"] = all_trades
+        compact["individual_breakdown"] = individual_results
+        return compact
 
 def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move_end_idx: int, adr_20: float = None) -> tuple[bool, dict]:
     """
