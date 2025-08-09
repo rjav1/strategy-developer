@@ -1,7 +1,8 @@
 'use client'
 
-import React, { useState } from 'react'
-import { TrendingUp, TrendingDown, DollarSign, Target, BarChart3, PieChart, Award, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react'
+import React, { useEffect, useRef, useState } from 'react'
+import { TrendingUp, TrendingDown, DollarSign, Target, BarChart3, PieChart, Award, AlertTriangle, ChevronDown, ChevronUp, LineChart, X } from 'lucide-react'
+import Smooth30DayScroller from './Smooth30DayScroller'
 
 interface MultiSymbolResultsProps {
   results: any
@@ -20,6 +21,23 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
     breakdown: false,
     individual: false
   })
+
+  // Modal state for per-symbol chart preview
+  const [modalSymbol, setModalSymbol] = useState<string | null>(null)
+  const [symbolChart, setSymbolChart] = useState<any>(null)
+  const [symbolLoading, setSymbolLoading] = useState(false)
+  const pollingRef = useRef<any>(null)
+
+  // Cleanup on unmount - MUST be before any conditional returns
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current)
+      }
+    }
+  }, [])
+
+
 
   const toggleSection = (section: string) => {
     setExpandedSections(prev => ({
@@ -43,9 +61,108 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
   // Coalesce results to an empty object while running or before first payload arrives
   const safe = results || {}
   const metrics = (safe && safe.results) ? safe.results : {}
-  const individual = safe.individual_breakdown || {}
+  // Backend returns individual_results (primary) and may attach individual_breakdown in error cases
+  const individual = safe.individual_results || safe.individual_breakdown || {}
   const symbolsPassed = safe.symbols_passed || []
-  const symbolsFailed = safe.symbols_failed || []
+  const symbolsProfitable = (safe.symbols_profitable || []).filter((s: string) => {
+    const r = individual[s]
+    return r && (r.status === 'completed') && (r.trades || r.results?.total_trades || 0) > 0
+  })
+  const symbolsUnprofitable = (safe.symbols_unprofitable || []).filter((s: string) => {
+    const r = individual[s]
+    return r && (r.status === 'completed') && (r.trades || r.results?.total_trades || 0) > 0
+  })
+  const symbolsNoTrades = Object.keys(individual).filter((s) => {
+    const r = individual[s]
+    return r && r.status === 'no_trades'
+  })
+  const symbolsFailed = (safe.symbols_failed || Object.keys(individual).filter((s) => individual[s]?.status === 'failed'))
+
+  // Convert display period to API period (e.g., "12 months" -> "12mo")
+  const getApiPeriod = (p: string) => {
+    if (!p) return '1y'
+    const m = p.match(/(\d+)\s*months?/i)
+    if (m) return `${m[1]}mo`
+    return p
+  }
+
+  // Helpers
+  const formatProfitFactor = (pf: number | null, isInfinite: boolean): string => {
+    if (isInfinite) return '100.00'
+    if (Number.isFinite(pf as number)) return (pf as number).toFixed(2)
+    return '—'
+  }
+  const statusBadge = (status: 'completed' | 'no_trades' | 'failed') => {
+    switch (status) {
+      case 'completed': return { label: 'Completed', tone: 'default' as const }
+      case 'no_trades': return { label: 'No trades', tone: 'muted' as const }
+      case 'failed': return { label: 'Failed', tone: 'error' as const }
+    }
+  }
+
+  // Open modal and fetch chart data for specific symbol
+  const openSymbolChart = async (symbol: string) => {
+    setModalSymbol(symbol)
+    setSymbolChart(null)
+    setSymbolLoading(true)
+
+    try {
+      const startResponse = await fetch('http://localhost:8000/backtest/momentum/progress', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker: symbol,
+          period: getApiPeriod(period),
+          initial_capital: initialCapital
+        })
+      })
+      if (!startResponse.ok) throw new Error(`Failed to start preview for ${symbol}`)
+      const { job_id } = await startResponse.json()
+
+      // Poll for completion
+      pollingRef.current = setInterval(async () => {
+        try {
+          const res = await fetch(`http://localhost:8000/backtest/progress/${job_id}`)
+          if (res.ok) {
+            const data = await res.json()
+            if (data.status === 'completed' && data.results) {
+              clearInterval(pollingRef.current)
+              pollingRef.current = null
+              setSymbolChart({
+                price_data: data.results.price_data || [],
+                trades: data.results.trades || [],
+                momentum_periods: data.results.momentum_periods || []
+              })
+              setSymbolLoading(false)
+            } else if (data.status === 'error') {
+              clearInterval(pollingRef.current)
+              pollingRef.current = null
+              setSymbolLoading(false)
+            }
+          }
+        } catch (_) {
+          // swallow poll errors
+        }
+      }, 1500)
+    } catch (_) {
+      setSymbolLoading(false)
+    }
+  }
+
+  // Close modal
+  const closeModal = () => {
+    setModalSymbol(null)
+    setSymbolChart(null)
+    setSymbolLoading(false)
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current)
+      pollingRef.current = null
+    }
+  }
+
+
+
+
 
   // Portfolio Summary Cards
   const portfolioCards = [
@@ -68,7 +185,7 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
     {
       title: 'Symbols Tested',
       value: `${metrics.symbols_passed || 0}`,
-      change: `${metrics.symbols_failed || 0} failed`,
+      change: `${metrics.profitable_symbols || 0} profitable, ${metrics.unprofitable_symbols || 0} unprofitable`,
       icon: BarChart3,
       color: 'text-blue-400',
       bgColor: 'bg-blue-500/10'
@@ -209,20 +326,28 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
               <div className="space-y-3">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Symbols Tested</span>
-                  <span className="text-white font-medium">{metrics.symbols_tested || 0}</span>
+                  <span className="text-white font-medium">{(safe.symbols_tested_count) || metrics.symbols_tested || (safe.symbols_tested?.length) || Object.keys(individual).length || 0}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Successful</span>
                   <span className="text-green-400 font-medium">{metrics.symbols_passed || 0}</span>
                 </div>
                 <div className="flex justify-between">
+                  <span className="text-muted-foreground">Profitable</span>
+                  <span className="text-green-400 font-medium">{metrics.profitable_symbols || 0}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Unprofitable</span>
+                  <span className="text-red-400 font-medium">{metrics.unprofitable_symbols || 0}</span>
+                </div>
+                <div className="flex justify-between">
                   <span className="text-muted-foreground">Failed</span>
                   <span className="text-red-400 font-medium">{metrics.symbols_failed || 0}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Success Rate</span>
+                  <span className="text-muted-foreground">Profit Rate</span>
                   <span className="text-white font-medium">
-                    {metrics.symbols_tested ? ((metrics.symbols_passed / metrics.symbols_tested) * 100).toFixed(1) : 0}%
+                    {metrics.symbols_passed ? ((metrics.profitable_symbols / metrics.symbols_passed) * 100).toFixed(1) : 0}%
                   </span>
                 </div>
               </div>
@@ -274,18 +399,27 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
 
         {expandedSections.individual && (
           <div className="space-y-4">
-            {/* Successful Symbols */}
-            {symbolsPassed.length > 0 && (
+            {/* Profitable Symbols */}
+            {symbolsProfitable.length > 0 && (
               <div>
-                <h4 className="text-lg font-medium text-green-400 mb-3">Successful Symbols ({symbolsPassed.length})</h4>
+                <h4 className="text-lg font-medium text-green-400 mb-3">Profitable Symbols ({symbolsProfitable.length})</h4>
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {symbolsPassed.map((symbol: string) => {
+                  {symbolsProfitable.map((symbol: string) => {
                     const result = individual[symbol]
                     const symbolMetrics = result?.results || {}
                     return (
-                      <div key={symbol} className="p-4 bg-green-500/5 rounded-lg border border-green-500/20">
+                      <div key={symbol} className={`p-4 rounded-lg border ${ (individual[symbol]?.status === 'no_trades') ? 'bg-green-500/5 border-green-500/10 opacity-70' : 'bg-green-500/5 border-green-500/20' }`}>
                         <div className="flex items-center justify-between mb-3">
-                          <h5 className="font-semibold text-white text-lg">{symbol}</h5>
+                          <h5 className="font-semibold text-white text-lg flex items-center gap-2">
+                            {symbol}
+                            <button
+                              title="View chart"
+                              className="p-1 rounded hover:bg-white/10 transition-colors"
+                              onClick={() => openSymbolChart(symbol)}
+                            >
+                              <LineChart className="h-4 w-4 text-purple-400" />
+                            </button>
+                          </h5>
                           <div className="text-right">
                             <div className="text-green-400 font-medium">${symbolMetrics.total_pnl?.toFixed(2) || '0.00'}</div>
                             <div className="text-sm text-muted-foreground">{symbolMetrics.total_return_pct?.toFixed(2) || '0.00'}%</div>
@@ -294,7 +428,7 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
                         <div className="grid grid-cols-3 gap-4 text-sm">
                           <div>
                             <div className="text-muted-foreground">Trades</div>
-                            <div className="text-white font-medium">{symbolMetrics.total_trades || 0}</div>
+                            <div className="text-white font-medium">{individual[symbol]?.trades ?? symbolMetrics.total_trades ?? 0}</div>
                           </div>
                           <div>
                             <div className="text-muted-foreground">Win Rate</div>
@@ -302,9 +436,85 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
                           </div>
                           <div>
                             <div className="text-muted-foreground">Profit Factor</div>
-                            <div className="text-white font-medium">{symbolMetrics.profit_factor?.toFixed(2) || '0.00'}</div>
+                            <div className="text-white font-medium">{formatProfitFactor(individual[symbol]?.profit_factor ?? symbolMetrics.profit_factor, individual[symbol]?.profit_factor_is_infinite ?? false)}</div>
                           </div>
                         </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Unprofitable Symbols */}
+            {symbolsUnprofitable.length > 0 && (
+              <div>
+                <h4 className="text-lg font-medium text-red-400 mb-3">Unprofitable Symbols ({symbolsUnprofitable.length})</h4>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {symbolsUnprofitable.map((symbol: string) => {
+                    const result = individual[symbol]
+                    const symbolMetrics = result?.results || {}
+                    return (
+                      <div key={symbol} className={`p-4 rounded-lg border ${ (individual[symbol]?.status === 'no_trades') ? 'bg-red-500/5 border-red-500/10 opacity-70' : 'bg-red-500/5 border-red-500/20' }`}>
+                        <div className="flex items-center justify-between mb-3">
+                          <h5 className="font-semibold text-white text-lg flex items-center gap-2">
+                            {symbol}
+                            <button
+                              title="View chart"
+                              className="p-1 rounded hover:bg-white/10 transition-colors"
+                              onClick={() => openSymbolChart(symbol)}
+                            >
+                              <LineChart className="h-4 w-4 text-purple-400" />
+                            </button>
+                          </h5>
+                          <div className="text-right">
+                            <div className="text-red-400 font-medium">${symbolMetrics.total_pnl?.toFixed(2) || '0.00'}</div>
+                            <div className="text-sm text-muted-foreground">{symbolMetrics.total_return_pct?.toFixed(2) || '0.00'}%</div>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-4 text-sm">
+                          <div>
+                            <div className="text-muted-foreground">Trades</div>
+                            <div className="text-white font-medium">{individual[symbol]?.trades ?? symbolMetrics.total_trades ?? 0}</div>
+                          </div>
+                          <div>
+                            <div className="text-muted-foreground">Win Rate</div>
+                            <div className="text-white font-medium">{symbolMetrics.win_rate?.toFixed(1) || '0.0'}%</div>
+                          </div>
+                          <div>
+                            <div className="text-muted-foreground">Profit Factor</div>
+                            <div className="text-white font-medium">{formatProfitFactor(individual[symbol]?.profit_factor ?? symbolMetrics.profit_factor, individual[symbol]?.profit_factor_is_infinite ?? false)}</div>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* No-trade Symbols */}
+            {symbolsNoTrades.length > 0 && (
+              <div>
+                <h4 className="text-lg font-medium text-yellow-400 mb-3">No-trade Symbols ({symbolsNoTrades.length})</h4>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  {symbolsNoTrades.map((symbol: string) => {
+                    const result = individual[symbol]
+                    return (
+                      <div key={symbol} className="p-3 bg-yellow-500/5 rounded-lg border border-yellow-500/20">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-white flex items-center gap-2">
+                            {symbol}
+                            <button
+                              title="View chart"
+                              className="p-1 rounded hover:bg-white/10 transition-colors"
+                              onClick={() => openSymbolChart(symbol)}
+                            >
+                              <LineChart className="h-4 w-4 text-purple-400" />
+                            </button>
+                          </span>
+                        </div>
+                        <div className="text-sm text-yellow-300 mt-1">No trades generated</div>
                       </div>
                     )
                   })}
@@ -325,7 +535,7 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
                           <span className="font-medium text-white">{symbol}</span>
                           <AlertTriangle className="h-4 w-4 text-red-400" />
                         </div>
-                        <div className="text-sm text-red-300 mt-1">{result?.error || 'Unknown error'}</div>
+                        <div className="text-sm text-red-300 mt-1" title={result?.error || ''}>{result?.error || 'Data unavailable'}</div>
                       </div>
                     )
                   })}
@@ -335,6 +545,44 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
           </div>
         )}
       </div>
+
+      {/* Chart Modal */}
+      {modalSymbol && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 rounded-lg shadow-xl max-w-6xl w-full max-h-[90vh] overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b border-gray-700">
+              <h3 className="text-lg font-semibold text-white">{modalSymbol} Chart Preview</h3>
+              <button
+                onClick={closeModal}
+                className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
+              >
+                <X className="h-5 w-5 text-gray-400" />
+              </button>
+            </div>
+            <div className="p-4 overflow-auto max-h-[calc(90vh-80px)]">
+              {symbolLoading ? (
+                <div className="flex items-center justify-center h-64">
+                  <div className="flex items-center gap-3">
+                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-purple-500"></div>
+                    <span className="text-gray-300">Loading {modalSymbol} chart...</span>
+                  </div>
+                </div>
+              ) : symbolChart ? (
+                <Smooth30DayScroller
+                  priceData={symbolChart.price_data || []}
+                  trades={symbolChart.trades || []}
+                  momentumPeriods={symbolChart.momentum_periods || []}
+                  ticker={modalSymbol}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-64">
+                  <div className="text-gray-400">Failed to load chart data</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 } 

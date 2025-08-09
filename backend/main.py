@@ -2986,9 +2986,15 @@ async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str,
                         print(f"❌ Could not fetch data for {symbol} - fetch_result was {fetch_result}")
                         individual_results[symbol] = {
                             "success": False,
+                            "status": "failed",
                             "error": f"Could not fetch data for {symbol} - fetch returned {fetch_result}",
                             "results": {},
-                            "trades": []
+                            "bars_loaded": 0,
+                            "trades": 0,
+                            "wins_sum": 0.0,
+                            "losses_sum": 0.0,
+                            "profit_factor": None,
+                            "profit_factor_is_infinite": False
                         }
                         continue
                     
@@ -3023,9 +3029,15 @@ async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str,
                         print(f"❌ Simulation failed for {symbol} - simulation returned {simulation_result}")
                         individual_results[symbol] = {
                             "success": False,
+                            "status": "failed",
                             "error": f"Simulation failed for {symbol} - simulation returned {simulation_result}",
                             "results": {},
-                            "trades": []
+                            "bars_loaded": 0,
+                            "trades": 0,
+                            "wins_sum": 0.0,
+                            "losses_sum": 0.0,
+                            "profit_factor": None,
+                            "profit_factor_is_infinite": False
                         }
                         continue
                     
@@ -3054,20 +3066,66 @@ async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str,
                     
                     if not results["success"]:
                         print(f"❌ Results generation failed for {symbol} - success was {results.get('success')}")
-                        individual_results[symbol] = results
+                        individual_results[symbol] = {
+                            "success": False,
+                            "status": "failed",
+                            "error": results.get("error", "Results generation failed"),
+                            "results": {},
+                            "bars_loaded": 0,
+                            "trades": 0,
+                            "wins_sum": 0.0,
+                            "losses_sum": 0.0,
+                            "profit_factor": None,
+                            "profit_factor_is_infinite": False
+                        }
                         continue
                     
                     # Build a compact per-symbol summary to keep payload small
+                    # Compute robust PF and status at the per-symbol level
+                    symbol_trades = results.get("trades", [])
+                    trades_count = len(symbol_trades) if isinstance(symbol_trades, list) else 0
+                    wins_sum = float(sum(t.get("pnl", 0) for t in symbol_trades if t.get("pnl", 0) > 0))
+                    losses_sum = float(sum(t.get("pnl", 0) for t in symbol_trades if t.get("pnl", 0) < 0))  # negative or 0
+                    if trades_count == 0:
+                        status = "no_trades"
+                        pf_value = None
+                        pf_inf = False
+                    elif wins_sum > 0 and losses_sum == 0:
+                        status = "completed"
+                        pf_value = None
+                        pf_inf = True
+                    elif wins_sum == 0 and losses_sum == 0:
+                        status = "completed"
+                        pf_value = None
+                        pf_inf = False
+                    else:
+                        status = "completed"
+                        pf_value = wins_sum / abs(losses_sum) if abs(losses_sum) > 0 else None
+                        pf_inf = False
+
+                    bars_loaded = 0
+                    try:
+                        if hasattr(backtester, 'daily_data') and backtester.daily_data is not None:
+                            bars_loaded = int(getattr(backtester.daily_data, 'shape', [0])[0]) if hasattr(backtester.daily_data, 'shape') else len(backtester.daily_data)
+                    except Exception:
+                        bars_loaded = 0
+
                     compact_result = {
                         "success": True,
+                        "status": status,
+                        "error": results.get("error"),
                         "results": results.get("results", {}),
-                        "error": results.get("error")
+                        "bars_loaded": bars_loaded,
+                        "trades": trades_count,
+                        "wins_sum": round(wins_sum, 2),
+                        "losses_sum": round(losses_sum, 2),
+                        "profit_factor": pf_value if (pf_value is None or (isinstance(pf_value, (int, float)) and pf_value == pf_value and pf_value != float('inf') and pf_value != float('-inf'))) else None,
+                        "profit_factor_is_infinite": pf_inf
                     }
                     individual_results[symbol] = make_json_serializable(compact_result)
                     all_symbols_tested.append(symbol)
                     
                     # Accumulate trades for combined metrics calculation
-                    symbol_trades = results.get("trades", [])
                     if isinstance(symbol_trades, list) and symbol_trades:
                         # Add symbol identifier to each trade for tracking
                         for trade in symbol_trades:
@@ -3098,18 +3156,30 @@ async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str,
                     print(f"❌ Error processing {symbol}: {str(e)}")
                     individual_results[symbol] = {
                         "success": False,
+                        "status": "failed",
                         "error": f"Error processing {symbol}: {str(e)}",
                         "results": {},
-                        "trades": []
+                        "bars_loaded": 0,
+                        "trades": 0,
+                        "wins_sum": 0.0,
+                        "losses_sum": 0.0,
+                        "profit_factor": None,
+                        "profit_factor_is_infinite": False
                     }
                     
             except Exception as e:
                 print(f"❌ Outer error processing {symbol}: {str(e)}")
                 individual_results[symbol] = {
                     "success": False,
+                    "status": "failed",
                     "error": f"Outer error processing {symbol}: {str(e)}",
                     "results": {},
-                    "trades": []
+                    "bars_loaded": 0,
+                    "trades": 0,
+                    "wins_sum": 0.0,
+                    "losses_sum": 0.0,
+                    "profit_factor": None,
+                    "profit_factor_is_infinite": False
                 }
         
         # Calculate combined metrics
@@ -3162,6 +3232,21 @@ def calculate_combined_metrics(individual_results: dict, all_trades: list, total
             "symbols_failed": list(individual_results.keys())
         }
     
+    # Categorize symbols by profitability but only include those with trades > 0
+    profitable_symbols = []
+    unprofitable_symbols = []
+    for symbol, result in successful_results.items():
+        trades_count_sym = result.get("trades")
+        if trades_count_sym is None:
+            trades_count_sym = result.get("results", {}).get("total_trades", 0)
+        if (trades_count_sym or 0) <= 0:
+            continue  # skip no-trade symbols
+        symbol_pnl = result.get("results", {}).get("total_pnl", 0)
+        if symbol_pnl > 0:
+            profitable_symbols.append(symbol)
+        else:
+            unprofitable_symbols.append(symbol)
+    
     # Calculate combined metrics
     total_trades = len(all_trades)
     winning_trades = len([t for t in all_trades if t.get("pnl", 0) > 0])
@@ -3202,10 +3287,14 @@ def calculate_combined_metrics(individual_results: dict, all_trades: list, total
             "avg_trade_pnl": round(avg_trade_pnl, 2),
             "avg_win": round(avg_win, 2),
             "avg_loss": round(avg_loss, 2),
-            "profit_factor": round(profit_factor, 2),
-            "symbols_tested": len(symbols_tested),
+            "profit_factor": round(profit_factor, 2) if profit_factor not in [float('inf'), float('-inf')] else None,
+            "profit_factor_is_infinite": True if profit_factor in [float('inf'), float('-inf')] else False,
+            # Count all attempted symbols rather than only passed ones to avoid under-reporting
+            "symbols_tested": len(individual_results),
             "symbols_passed": len(successful_results),
             "symbols_failed": len(individual_results) - len(successful_results),
+            "profitable_symbols": len(profitable_symbols),
+            "unprofitable_symbols": len(unprofitable_symbols),
             "best_symbol": best_symbol[0],
             "best_symbol_pnl": round(best_symbol[1], 2),
             "worst_symbol": worst_symbol[0],
@@ -3213,9 +3302,13 @@ def calculate_combined_metrics(individual_results: dict, all_trades: list, total
             "total_initial_capital": total_initial_capital,
             "avg_return_per_symbol": round(total_return_pct / len(successful_results), 2) if successful_results else 0
         },
-        "symbols_tested": symbols_tested,
+        # Also return explicit lists for UI purposes
+        "symbols_tested": list(individual_results.keys()),
+        "symbols_tested_count": len(individual_results),
         "symbols_passed": list(successful_results.keys()),
-        "symbols_failed": [k for k, v in individual_results.items() if not v.get("success", False)]
+        "symbols_failed": [k for k, v in individual_results.items() if not v.get("success", False)],
+        "symbols_profitable": profitable_symbols,
+        "symbols_unprofitable": unprofitable_symbols
     }
     if strip_trades:
         return compact

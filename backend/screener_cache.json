@@ -1,0 +1,120 @@
+{
+  "sessions": [
+    {
+      "session_id": "a6871f7b",
+      "screener_type": "momentum",
+      "parameters": {
+        "symbols": null,
+        "criteria": {
+          "days_large_move": 30,
+          "pct_large_move": 0.3,
+          "min_consol_days": 3,
+          "max_consol_days": 15,
+          "max_range_pct": 0.1,
+          "below_avg_volume": true,
+          "below_avg_range": true,
+          "ma10_tolerance_pct": 0.05,
+          "reconsol_days": 3,
+          "reconsol_volume_pct": 0.8,
+          "linear_r2_threshold": 0.7,
+          "avoid_barcode_max_avgrange": 0.05
+        },
+        "include_bad_setups": false
+      },
+      "results": [
+        {
+          "symbol": "AACG",
+          "criteria_met": {
+            "large_move": true,
+            "consolidation": false,
+            "above_50_sma": true,
+            "adr_range": true,
+            "avg_volume": false,
+            "industry_strength": false
+          },
+          "total_met": 3,
+          "pattern_strength": "Weak",
+          "confidence_score": 50.0,
+          "name": "ATA Creativity Global"
+        },
+        {
+          "symbol": "AAL",
+          "criteria_met": {
+            "large_move": false,
+            "consolidation": false,
+            "above_50_sma": true,
+            "adr_range": true,
+            "avg_volume": true,
+            "industry_strength": false
+          },
+          "total_met": 3,
+          "pattern_strength": "Weak",
+          "confidence_score": 50.0,
+          "name": "American Airlines Group Inc."
+        },
+        {
+          "symbol": "AAOI",
+          "criteria_met": {
+            "large_move": false,
+            "consolidation": false,
+            "above_50_sma": true,
+            "adr_range": true,
+            "avg_volume": true,
+            "industry_strength": false
+          },
+          "total_met": 3,
+          "pattern_strength": "Weak",
+          "confidence_score": 50.0,
+          "name": "Applied Optoelectronics, Inc."
+        },
+        {
+          "symbol": "AAON",
+          "criteria_met": {
+            "large_move": false,
+            "consolidation": false,
+            "above_50_sma": true,
+            "adr_range": true,
+            "avg_volume": true,
+            "industry_strength": false
+          },
+          "total_met": 3,
+          "pattern_strength": "Weak",
+          "confidence_score": 50.0,
+          "name": "AAON, Inc."
+        }
+      ],
+      "total_results": 4,
+      "created_at": "2025-08-07T01:31:58.613014",
+      "updated_at": "2025-08-07T01:32:03.003490",
+      "status": "running"
+    },
+    {
+      "session_id": "db66afbb",
+      "screener_type": "momentum",
+      "parameters": {
+        "symbols": null,
+        "criteria": {
+          "days_large_move": 30,
+          "pct_large_move": 0.3,
+          "min_consol_days": 3,
+          "max_consol_days": 15,
+          "max_range_pct": 0.1,
+          "below_avg_volume": true,
+          "below_avg_range": true,
+          "ma10_tolerance_pct": 0.05,
+          "reconsol_days": 3,
+          "reconsol_volume_pct": 0.8,
+          "linear_r2_threshold": 0.7,
+          "avoid_barcode_max_avgrange": 0.05
+        },
+        "include_bad_setups": false
+      },
+      "results": [],
+      "total_results": 0,
+      "created_at": "2025-08-07T01:46:42.908301",
+      "updated_at": "2025-08-07T01:46:42.908301",
+      "status": "running"
+    }
+  ],
+  "last_updated": "2025-08-07T01:46:42.908570"
+}

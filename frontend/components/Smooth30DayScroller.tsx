@@ -898,8 +898,8 @@ export default function Smooth30DayScroller({
   }
   
   if (showPlotlyView) {
-    // Plotly fallback view with region selection
-    const allData = [{
+    // Plotly fallback view with momentum highlighting
+    const allData: any[] = [{
       type: 'candlestick',
       x: priceData.map(d => d.date),
       open: priceData.map(d => d.open),
@@ -910,6 +910,91 @@ export default function Smooth30DayScroller({
       increasing: { line: { color: '#10b981' } },
       decreasing: { line: { color: '#ef4444' } }
     }]
+
+    // Add momentum period highlighting as shapes
+    const shapes: any[] = []
+    if (momentumPeriods && momentumPeriods.length > 0) {
+      momentumPeriods.forEach((period: any) => {
+        let startDate: Date, endDate: Date, color: string
+        
+        if (period.start_date && period.end_date) {
+          startDate = new Date(period.start_date)
+          endDate = new Date(period.end_date)
+          if (period.type === 'momentum') {
+            color = 'rgba(239, 68, 68, 0.2)' // Red for momentum
+          } else if (period.type === 'consolidation') {
+            color = 'rgba(251, 191, 36, 0.2)' // Yellow for consolidation
+          } else {
+            color = 'rgba(16, 185, 129, 0.2)' // Green for positions
+          }
+        } else if (period.date && period.state) {
+          startDate = new Date(period.date)
+          endDate = new Date(startDate.getTime() + 24 * 60 * 60 * 1000)
+          if (period.state === 'MOMENTUM') {
+            color = 'rgba(239, 68, 68, 0.2)'
+          } else if (period.state === 'CONSOLIDATION') {
+            color = 'rgba(251, 191, 36, 0.2)'
+          } else if (period.state === 'IN_POSITION') {
+            color = 'rgba(16, 185, 129, 0.2)'
+          } else {
+            return // Skip unknown states
+          }
+        } else {
+          return // Skip malformed periods
+        }
+
+        shapes.push({
+          type: 'rect',
+          xref: 'x',
+          yref: 'paper',
+          x0: startDate.toISOString().split('T')[0],
+          x1: endDate.toISOString().split('T')[0],
+          y0: 0,
+          y1: 1,
+          fillcolor: color,
+          opacity: 0.3,
+          line: { width: 0 }
+        })
+      })
+    }
+
+    // Add trade markers as scatters
+    if (trades && trades.length > 0) {
+      trades.forEach((trade: any, index: number) => {
+        if (trade.entry_date && trade.entry_price) {
+          // Entry marker
+          allData.push({
+            type: 'scatter',
+            mode: 'markers',
+            x: [trade.entry_date],
+            y: [trade.entry_price],
+            marker: {
+              color: '#10b981',
+              size: 10,
+              symbol: 'triangle-up'
+            },
+            name: `Entry ${index + 1}`,
+            showlegend: false
+          })
+        }
+        if (trade.exit_date && trade.exit_price) {
+          // Exit marker
+          allData.push({
+            type: 'scatter',
+            mode: 'markers',
+            x: [trade.exit_date],
+            y: [trade.exit_price],
+            marker: {
+              color: trade.pnl >= 0 ? '#10b981' : '#ef4444',
+              size: 10,
+              symbol: 'triangle-down'
+            },
+            name: `Exit ${index + 1}`,
+            showlegend: false
+          })
+        }
+      })
+    }
     
     return (
       <div className="space-y-4">
@@ -942,7 +1027,8 @@ export default function Smooth30DayScroller({
               paper_bgcolor: 'rgba(17, 24, 39, 1)',
               font: { color: 'white' },
               margin: { l: 60, r: 60, t: 60, b: 60 },
-              height: 500
+              height: 500,
+              shapes: shapes
             }}
             config={{
               displayModeBar: true,
@@ -961,6 +1047,20 @@ export default function Smooth30DayScroller({
           />
           <div className="mt-4 text-sm text-gray-400 text-center">
             Use the range selector below or drag to zoom. Double-click to reset zoom.
+          </div>
+          <div className="mt-2 flex items-center justify-center gap-4 text-xs">
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 bg-red-400 opacity-30 rounded"></div>
+              <span className="text-gray-300">Momentum</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 bg-yellow-400 opacity-30 rounded"></div>
+              <span className="text-gray-300">Consolidation</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 bg-green-400 opacity-30 rounded"></div>
+              <span className="text-gray-300">In Position</span>
+            </div>
           </div>
         </div>
       </div>

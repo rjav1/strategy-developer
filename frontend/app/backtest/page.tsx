@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { Play, Settings, BarChart3, Clock, Target, Bookmark, Plus, X, TrendingUp, Download, RefreshCw, Trash2 } from 'lucide-react'
+import Dropdown from '../../components/Dropdown'
 import BacktestResults from '../../components/BacktestResults'
 import TradeLog from '../../components/TradeLog'
 import Smooth30DayScroller from '../../components/Smooth30DayScroller'
@@ -65,8 +66,7 @@ export default function BacktestEngine() {
   const [liveResults, setLiveResults] = useState<any>(null)
   const [backtestPhase, setBacktestPhase] = useState<string>('')
   const [jobId, setJobId] = useState<string>('')
-  const [showClearLogsDialog, setShowClearLogsDialog] = useState(false)
-  const [pendingBacktest, setPendingBacktest] = useState<{ticker: string, shouldClear: boolean} | null>(null)
+  // Popup and log-clearing are no longer used; runs start immediately
   
   // Logs are now emitted to browser console only; no in-UI console
   
@@ -194,44 +194,10 @@ export default function BacktestEngine() {
 
   // Run momentum backtest
   const runMomentumBacktest = async (ticker: string) => {
-    // Check if there are existing logs and show confirmation dialog
-    try {
-      const response = await fetch('http://localhost:8000/logs?limit=1')
-      if (response.ok) {
-        const data = await response.json()
-        if (data.logs && data.logs.length > 0) {
-          // Show confirmation dialog
-          setPendingBacktest({ ticker, shouldClear: false })
-          setShowClearLogsDialog(true)
-          return
-        }
-      }
-    } catch (error) {
-      console.warn('Could not check existing logs:', error)
-    }
-    
-    // If no existing logs, start backtest directly
     await startBacktest(ticker, false)
   }
 
   const runMultiSymbolBacktest = async (symbols: string[]) => {
-    // Check if there are existing logs and show confirmation dialog
-    try {
-      const response = await fetch('http://localhost:8000/logs?limit=1')
-      if (response.ok) {
-        const data = await response.json()
-        if (data.logs && data.logs.length > 0) {
-          // Show confirmation dialog - use first symbol as representative
-          setPendingBacktest({ ticker: symbols.join(','), shouldClear: false })
-          setShowClearLogsDialog(true)
-          return
-        }
-      }
-    } catch (error) {
-      console.warn('Could not check existing logs:', error)
-    }
-    
-    // If no existing logs, start multi-symbol backtest directly
     await startMultiSymbolBacktest(symbols, false)
   }
 
@@ -445,9 +411,14 @@ export default function BacktestEngine() {
               setCandleProgress(progressData.candle_progress || 0)
               setCandleTotal(progressData.candle_total || 100)
               
-              // Update live results if available
+              // Update live results if available (enrich with individual_results for per-symbol cards)
               if (progressData.live_results) {
-                setLiveResults(progressData.live_results)
+                const enrichedLiveResults = {
+                  ...progressData.live_results,
+                  // Attach the latest individual_results so symbol cards can display metrics
+                  individual_results: progressData.individual_results || {}
+                }
+                setLiveResults(enrichedLiveResults)
               }
             }
             
@@ -470,9 +441,14 @@ export default function BacktestEngine() {
 
                 console.log('🚀 Multi-symbol backtest completed:', progressData)
 
-                // Prefer compact combined results if present
+                // Prefer compact combined results if present, but enrich with individual_results
                 const combined = progressData.results || progressData.combined_results || progressData
-                setBacktestResult(combined)
+                const enrichedCombined = {
+                  ...combined,
+                  // Ensure per-symbol metrics are available to the UI
+                  individual_results: progressData.individual_results || combined.individual_results || {}
+                }
+                setBacktestResult(enrichedCombined)
                 setSelectedTickerForBacktest('Multi-Symbol Portfolio')
                 setProgress(100)
                 setBacktestPhase('Completed')
@@ -523,20 +499,7 @@ export default function BacktestEngine() {
   }
 
   // Handle clear logs dialog response
-  const handleClearLogsDialog = (shouldClear: boolean) => {
-    setShowClearLogsDialog(false)
-    if (pendingBacktest) {
-      if (pendingBacktest.ticker.includes(',')) {
-        // Multi-symbol backtest
-        const symbols = pendingBacktest.ticker.split(',')
-        startMultiSymbolBacktest(symbols, shouldClear)
-      } else {
-        // Single symbol backtest
-        startBacktest(pendingBacktest.ticker, shouldClear)
-      }
-      setPendingBacktest(null)
-    }
-  }
+  // The clear logs dialog and related helpers have been removed
 
   // Run backtest for selected symbols
   const runBacktest = async () => {
@@ -667,22 +630,12 @@ export default function BacktestEngine() {
               <label className="block text-sm font-medium text-muted-foreground mb-2">
                 Strategy
               </label>
-              <select 
+              <Dropdown
+                options={[{ value: '', label: loadingStrategies ? 'Loading strategies...' : 'Select a strategy' }, ...strategies.map((s: any) => ({ value: s.id, label: `${s.name}${s.type === 'builtin' ? ' (Built-in)' : ''}` }))]}
                 value={selectedStrategy}
-                onChange={(e) => setSelectedStrategy(e.target.value)}
+                onChange={setSelectedStrategy}
                 disabled={loadingStrategies}
-                className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white disabled:opacity-50"
-              >
-                <option value="">
-                  {loadingStrategies ? 'Loading strategies...' : 'Select a strategy'}
-                </option>
-                {strategies.map((strategy) => (
-                  <option key={strategy.id} value={strategy.id}>
-                    {strategy.name}
-                    {strategy.type === 'builtin' && ' (Built-in)'}
-                  </option>
-                ))}
-              </select>
+              />
               {strategies.length > 0 && (
                 <p className="text-xs text-muted-foreground mt-1">
                   {strategies.length} strategy{strategies.length !== 1 ? 'ies' : 'y'} available
@@ -755,18 +708,11 @@ export default function BacktestEngine() {
                         </div>
                       </div>
                     ) : (
-                      <select 
+                      <Dropdown
+                        options={[{ value: '', label: 'Select a watchlist' }, ...watchlists.map((w: any) => ({ value: w.id, label: `${w.name} (${w.symbols.length} symbols)` }))]}
                         value={selectedWatchlist}
-                        onChange={(e) => setSelectedWatchlist(e.target.value)}
-                        className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-xl focus:ring-2 focus:ring-purple-500 focus-border-transparent text-white"
-                      >
-                        <option value="">Select a watchlist</option>
-                        {watchlists.map((watchlist) => (
-                          <option key={watchlist.id} value={watchlist.id}>
-                            {watchlist.name} ({watchlist.symbols.length} symbols)
-                          </option>
-                        ))}
-                      </select>
+                        onChange={setSelectedWatchlist}
+                      />
                     )}
                   </div>
                 )}
@@ -1160,31 +1106,7 @@ export default function BacktestEngine() {
         </div>
       )}
 
-      {/* Clear Logs Confirmation Dialog */}
-      {showClearLogsDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 rounded-lg shadow-xl max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold text-white mb-4">Clear Logs Before Backtest?</h3>
-            <p className="text-gray-300 mb-6">
-              You have existing logs. Would you like to clear them before starting the new backtest for <strong>{pendingBacktest?.ticker}</strong>?
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => handleClearLogsDialog(false)}
-                className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
-              >
-                Keep Logs
-              </button>
-              <button
-                onClick={() => handleClearLogsDialog(true)}
-                className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
-              >
-                Clear Logs
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Clear Logs dialog removed - backtests run immediately without prompts */}
     </div>
   )
 } 

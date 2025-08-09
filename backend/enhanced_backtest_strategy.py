@@ -967,17 +967,32 @@ class EnhancedMomentumBacktester:
         final_metrics = self.backtest_frames[-1].performance_metrics
         
         # Trade statistics
+        total_trades_count = len(self.completed_trades)
+        winning_trades_count = len([t for t in self.completed_trades if t.pnl > 0])
+        losing_trades_count = len([t for t in self.completed_trades if t.pnl <= 0])
+
+        # Robust profit factor using sums of wins/losses (not averages)
+        wins_sum = float(sum(t.pnl for t in self.completed_trades if t.pnl > 0))
+        losses_sum_abs = float(abs(sum(t.pnl for t in self.completed_trades if t.pnl <= 0)))
+        if losses_sum_abs > 0:
+            profit_factor_value = wins_sum / losses_sum_abs
+            profit_factor_is_infinite = False
+        else:
+            profit_factor_value = float('inf') if wins_sum > 0 else 0.0
+            profit_factor_is_infinite = wins_sum > 0
+
         trade_stats = {
-            "total_trades": len(self.completed_trades),
-            "winning_trades": len([t for t in self.completed_trades if t.pnl > 0]),
-            "losing_trades": len([t for t in self.completed_trades if t.pnl <= 0]),
+            "total_trades": total_trades_count,
+            "winning_trades": winning_trades_count,
+            "losing_trades": losing_trades_count,
             "win_rate": final_metrics.get('win_rate', 0),
             "total_pnl": final_metrics.get('total_pnl', 0),
             "total_return_pct": final_metrics.get('total_return_pct', 0),
             "max_drawdown": final_metrics.get('max_drawdown', 0),
             "avg_win": final_metrics.get('avg_win', 0),
             "avg_loss": final_metrics.get('avg_loss', 0),
-            "profit_factor": abs(final_metrics.get('avg_win', 0) / final_metrics.get('avg_loss', 1)) if final_metrics.get('avg_loss', 0) != 0 else 0,
+            "profit_factor": profit_factor_value,
+            "profit_factor_is_infinite": profit_factor_is_infinite,
             "sharpe_ratio": self.calculate_sharpe_ratio()
         }
         
@@ -1018,6 +1033,8 @@ class EnhancedMomentumBacktester:
         return {
             "success": True,
             "results": trade_stats,
+            # Echo supplemental fields for the aggregator
+            "bars_loaded": len(price_data),
             "trades": trades_data,
             "price_data": price_data,
             "momentum_periods": highlights_data,
