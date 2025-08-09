@@ -50,7 +50,7 @@ try:
         detect_momentum_move_boundaries,
         calculate_atr,
     )
-from services.consolidation import detect_consolidation_pattern_new
+    from services.consolidation import detect_consolidation_pattern_new
     PRODUCTION_SCREENER_AVAILABLE = True
     print("✅ Production screener functions loaded successfully")
 except ImportError as e:

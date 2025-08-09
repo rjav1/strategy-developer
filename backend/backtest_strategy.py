@@ -185,8 +185,7 @@ class BacktestFrame:
             'trade_events': [e.to_dict() for e in self.trade_events],
             'performance_metrics': self.performance_metrics
         }
-    
-    return pattern_found, criteria_details, momentum_strength
+
 
 # Import breakout strategy functions (fallback to our own implementations if not available)
 try:
