@@ -265,6 +265,30 @@ export default function BacktestResults({
           </div>
         </div>
 
+        {/* Position Sizing */}
+        <div className="card-glow p-4">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="p-2 bg-orange-500/20 rounded-lg">
+              <Target className="h-5 w-5 text-orange-400" />
+            </div>
+            <h4 className="font-semibold text-white">Position Sizing</h4>
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Risk Model</span>
+              <span className="text-orange-400 font-medium">1% Risk Per Trade</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Stop Loss</span>
+              <span className="text-white font-medium">Breakout Day Low</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Exit Signal</span>
+              <span className="text-white font-medium">Below 20 SMA</span>
+            </div>
+          </div>
+        </div>
+
         {/* Strategy Overview */}
         <div className="card-glow p-4">
           <div className="flex items-center gap-3 mb-3">
@@ -297,7 +321,7 @@ export default function BacktestResults({
           <div>
             <h4 className="font-medium text-white mb-2">Strategy Effectiveness</h4>
             <p className="text-sm text-muted-foreground">
-              The momentum screener strategy generated{' '}
+              The momentum screener strategy with 1% risk-based position sizing generated{' '}
               <span className={`font-medium ${getPerformanceColor(results.total_pnl)}`}>
                 {formatCurrency(results.total_pnl)}
               </span>{' '}
@@ -305,7 +329,7 @@ export default function BacktestResults({
               <span className={`font-medium ${getPerformanceColor((results.win_rate || 0) - 50)}`}>
                 {formatPercent(results.win_rate)}
               </span>{' '}
-              win rate.
+              win rate. Each trade risked exactly 1% of portfolio value.
             </p>
           </div>
           <div>

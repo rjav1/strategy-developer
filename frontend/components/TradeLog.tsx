@@ -21,6 +21,11 @@ interface Trade {
   holding_period?: number
   status: 'open' | 'closed'
   exit_reason?: string
+  shares?: number
+  stop_loss?: number
+  risk_amount?: number
+  risk_percentage?: number
+  risk_per_share?: number
 }
 
 interface TradeLogProps {
@@ -186,6 +191,15 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
                 <th className="text-left p-4 text-sm font-medium text-muted-foreground">
                   Exit Price
                 </th>
+                <th className="text-left p-4 text-sm font-medium text-muted-foreground">
+                  Shares
+                </th>
+                <th className="text-left p-4 text-sm font-medium text-muted-foreground">
+                  Stop Loss
+                </th>
+                <th className="text-left p-4 text-sm font-medium text-muted-foreground">
+                  Risk Amount
+                </th>
                 <th className="text-left p-4 text-sm font-medium">
                   <SortButton field="holding_period">Hold Period</SortButton>
                 </th>
@@ -255,6 +269,38 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
                         <span className="text-white text-sm font-mono">
                           {formatCurrency(trade.exit_price)}
                         </span>
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground text-sm">-</span>
+                    )}
+                  </td>
+                  <td className="p-4">
+                    {trade.shares ? (
+                      <span className="text-white text-sm font-mono">
+                        {trade.shares.toLocaleString()}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground text-sm">-</span>
+                    )}
+                  </td>
+                  <td className="p-4">
+                    {trade.stop_loss ? (
+                      <span className="text-red-300 text-sm font-mono">
+                        {formatCurrency(trade.stop_loss)}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground text-sm">-</span>
+                    )}
+                  </td>
+                  <td className="p-4">
+                    {trade.risk_amount && trade.risk_percentage ? (
+                      <div className="text-sm">
+                        <div className="text-orange-300 font-mono">
+                          {formatCurrency(trade.risk_amount)}
+                        </div>
+                        <div className="text-orange-400 text-xs">
+                          ({trade.risk_percentage.toFixed(2)}%)
+                        </div>
                       </div>
                     ) : (
                       <span className="text-muted-foreground text-sm">-</span>

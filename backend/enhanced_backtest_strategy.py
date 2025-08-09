@@ -547,24 +547,54 @@ class EnhancedMomentumBacktester:
         return False, ""
     
     def execute_buy(self, current_date: datetime, current_row: pd.Series) -> MarketEvent:
-        """Execute buy order at close of breakout day"""
+        """Execute buy order at close of breakout day with 1% risk-based position sizing"""
         buy_price = current_row['Close']  # Execute at close of breakout day
-        shares = int(self.current_capital * 0.95 / buy_price)  # Use 95% of capital
         
-        # Store breakout day low for exit calculation
+        # Store breakout day low for exit calculation (this is our initial stop loss)
         self.breakout_day_low = current_row['Low']
+        initial_stop_loss = self.breakout_day_low
+        
+        # Calculate 1% risk-based position sizing
+        # Formula: (entry_price - stop_loss) × shares_to_buy = portfolio_size × 0.01
+        # Rearranged: shares_to_buy = (portfolio_size × 0.01) / (entry_price - stop_loss)
+        portfolio_value = self.current_capital
+        max_risk_amount = portfolio_value * 0.01  # 1% of portfolio
+        risk_per_share = buy_price - initial_stop_loss
+        
+        if risk_per_share <= 0:
+            # If stop loss is above or equal to entry price, use minimum position
+            log_warn(f"⚠️ Invalid risk calculation: entry=${buy_price:.2f}, stop=${initial_stop_loss:.2f}", {
+                "ticker": self.ticker,
+                "entry_price": buy_price,
+                "stop_loss": initial_stop_loss,
+                "date": current_date.date().isoformat()
+            }, "backtest")
+            shares = int(max_risk_amount / buy_price)  # Fallback to small position
+        else:
+            shares = int(max_risk_amount / risk_per_share)
+        
+        # Ensure we don't exceed available capital
+        max_affordable_shares = int(self.current_capital * 0.95 / buy_price)
+        shares = min(shares, max_affordable_shares)
+        
+        # Ensure minimum position of at least 1 share
+        shares = max(1, shares)
         
         self.current_trade = Trade(
             entry_date=current_date,
             entry_price=buy_price,
             entry_reason="Momentum Breakout",
             shares=shares,
-            stop_loss=buy_price * 0.98,
+            stop_loss=initial_stop_loss,  # Use breakout day low as stop loss
             target_price=buy_price * 1.04
         )
         
         self.current_capital -= shares * buy_price
         self.state = TradingState.IN_POSITION
+        
+        # Calculate actual risk for logging and event details
+        actual_risk_amount = shares * risk_per_share
+        risk_percentage = (actual_risk_amount / portfolio_value) * 100
         
         event = MarketEvent(
             date=current_date,
@@ -575,7 +605,11 @@ class EnhancedMomentumBacktester:
                 'shares': shares,
                 'cost_basis': shares * buy_price,
                 'stop_loss': self.current_trade.stop_loss,
-                'target_price': self.current_trade.target_price
+                'target_price': self.current_trade.target_price,
+                'risk_amount': actual_risk_amount,
+                'risk_percentage': risk_percentage,
+                'risk_per_share': risk_per_share,
+                'portfolio_value': portfolio_value
             }
         )
         
@@ -584,6 +618,20 @@ class EnhancedMomentumBacktester:
             "action": "BUY",
             "shares": shares,
             "price": buy_price,
+            "stop_loss": initial_stop_loss,
+            "risk_per_share": risk_per_share,
+            "risk_amount": actual_risk_amount,
+            "risk_percentage": risk_percentage,
+            "portfolio_value": portfolio_value,
+            "date": current_date.date().isoformat()
+        }, "backtest")
+        
+        log_info(f"   Position Sizing: Risk ${actual_risk_amount:.2f} ({risk_percentage:.2f}%) | Stop: ${initial_stop_loss:.2f} | Risk/Share: ${risk_per_share:.2f}", {
+            "ticker": self.ticker,
+            "actual_risk_amount": actual_risk_amount,
+            "risk_percentage": risk_percentage,
+            "stop_loss": initial_stop_loss,
+            "risk_per_share": risk_per_share,
             "date": current_date.date().isoformat()
         }, "backtest")
         return event
