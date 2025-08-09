@@ -939,32 +939,60 @@ def check_momentum_pattern(hist_data: pd.DataFrame, stock_symbol: str = None) ->
             'description': "Insufficient data for ADR calculation"
         }
     
-    # Criterion 6: Average Volume >= $1M
+    # Criterion 6: Average Volume >= $1M AND No Volume Anomalies
     if len(df) >= 20:
-        # Calculate average volume over recent period (last 20 days)
+        # Calculate average volume over recent period (last 20 days) - using ALL data
         recent_volume_data = df.tail(20)
-        avg_volume = recent_volume_data['Volume'].mean()
-        avg_price = recent_volume_data['Close'].mean()
-        avg_dollar_volume = avg_volume * avg_price  # Average dollar volume
+        volume_data = recent_volume_data['Volume']
+        price_data = recent_volume_data['Close']
         
-        volume_threshold = 1_000_000  # $1M threshold
-        criteria_met['criterion6'] = avg_dollar_volume >= volume_threshold
+        # Part 1: Standard volume calculation (using all data)
+        avg_volume = volume_data.mean()
+        avg_price = price_data.mean()
+        avg_dollar_volume = avg_volume * avg_price
+        volume_threshold = 1_000_000
+        volume_meets_threshold = avg_dollar_volume >= volume_threshold
+        
+        # Part 2: Anomaly detection (flag if any anomalies exist)
+        volume_mean = volume_data.mean()
+        volume_std = volume_data.std()
+        anomalies_detected = 0
+        no_anomalies = True
+        
+        if volume_std > 0:
+            z_scores = abs((volume_data - volume_mean) / volume_std)
+            # Detect extreme volume spikes (Z-score > 3.0)
+            anomaly_mask = z_scores > 3.0
+            anomalies_detected = anomaly_mask.sum()
+            no_anomalies = anomalies_detected == 0
+        
+        # Both parts must pass for criterion 6 to pass
+        criteria_met['criterion6'] = volume_meets_threshold and no_anomalies
+        
         criteria_details['criterion6'] = {
             'met': criteria_met['criterion6'],
+            'volume_meets_threshold': volume_meets_threshold,
+            'no_anomalies': no_anomalies,
             'avg_dollar_volume': round(avg_dollar_volume, 0),
             'threshold': volume_threshold,
             'avg_volume': round(avg_volume, 0),
             'avg_price': round(avg_price, 2),
-            'description': f"Average Volume: ${avg_dollar_volume:,.0f} (need ≥${volume_threshold:,}) - Why it matters: Confirms liquidity and reliability of price action"
+            'anomalies_detected': int(anomalies_detected),
+            'total_days_analyzed': len(recent_volume_data),
+            'description': f"Volume Criteria: ${avg_dollar_volume:,.0f} {'✅' if volume_meets_threshold else '❌'} (need ≥${volume_threshold:,}) AND No anomalies {'✅' if no_anomalies else '❌'} ({anomalies_detected} spikes detected). Both must pass."
         }
     else:
         criteria_met['criterion6'] = False
         criteria_details['criterion6'] = {
             'met': False,
+            'volume_meets_threshold': False,
+            'no_anomalies': True,
             'avg_dollar_volume': 0,
             'threshold': 1_000_000,
             'avg_volume': 0,
             'avg_price': 0,
+            'anomalies_detected': 0,
+            'total_days_analyzed': 0,
             'description': "Insufficient data for volume calculation"
         }
     
@@ -1870,7 +1898,7 @@ Pattern Strength: {strength}
    • Volume: {'✅' if criteria_details.get('criterion2_3', {}).get('volume_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_avg_volume', 0):.0f} vs {criteria_details.get('criterion2_3', {}).get('move_avg_volume', 0):.0f} (consolidation < move)
    • Daily Range: {'✅' if criteria_details.get('criterion2_3', {}).get('range_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('consolidation_avg_adr', 0):.1f}% vs {criteria_details.get('criterion2_3', {}).get('move_avg_adr', 0):.1f}% (consolidation < move)
    • Price Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('price_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('price_difference_adr', 0):.1f}% difference (need ≤{criteria_details.get('criterion2_3', {}).get('stability_threshold', 0):.1f}% 20-day ADR)
-   • Weighted Stability: {'✅' if criteria_details.get('criterion2_3', {}).get('stability_criterion_met', False) else '❌'} {criteria_details.get('criterion2_3', {}).get('weighted_stability', 0):.2f} (need ≤2.5) - Penalizes extreme outlier candles
+   • Price Floor (20% Dip Filter): {'✅' if criteria_details.get('criterion2_3', {}).get('price_floor_criterion_met', False) else '❌'} First candle: ${criteria_details.get('criterion2_3', {}).get('first_consolidation_close', 0):.2f}, Required floor: ${criteria_details.get('criterion2_3', {}).get('first_consolidation_close', 0) * 0.8:.2f}, Lowest close: ${criteria_details.get('criterion2_3', {}).get('min_consolidation_close', 0):.2f}
 
 4. PRICE ABOVE 50 SMA:
    Status: {'✅ PASSED' if criteria_details.get('criterion4', {}).get('met', False) else '❌ FAILED'}
@@ -1880,9 +1908,14 @@ Pattern Strength: {strength}
    Status: {'✅ PASSED' if criteria_details.get('criterion5', {}).get('met', False) else '❌ FAILED'}
    {criteria_details.get('criterion5', {}).get('description', 'Analysis not available')}
 
-6. AVERAGE VOLUME ≥ $1M:
+6. VOLUME CRITERIA (Two-Part Test):
    Status: {'✅ PASSED' if criteria_details.get('criterion6', {}).get('met', False) else '❌ FAILED'}
    {criteria_details.get('criterion6', {}).get('description', 'Analysis not available')}
+   
+   Sub-Criteria Breakdown:
+   • Volume Threshold: {'✅ PASSED' if criteria_details.get('criterion6', {}).get('volume_meets_threshold', False) else '❌ FAILED'} - ${criteria_details.get('criterion6', {}).get('avg_dollar_volume', 0):,.0f} (need ≥${criteria_details.get('criterion6', {}).get('threshold', 1000000):,})
+   • No Volume Anomalies: {'✅ PASSED' if criteria_details.get('criterion6', {}).get('no_anomalies', True) else '❌ FAILED'} - {criteria_details.get('criterion6', {}).get('anomalies_detected', 0)} statistical outliers detected in {criteria_details.get('criterion6', {}).get('total_days_analyzed', 20)} days
+   • Average Volume: {criteria_details.get('criterion6', {}).get('avg_volume', 0):,.0f} shares @ ${criteria_details.get('criterion6', {}).get('avg_price', 0):.2f}
 
 7. SECTOR TREND STRENGTH (STS) ≥70:
    Status: {'✅ PASSED' if criteria_details.get('criterion7', {}).get('met', False) else '❌ FAILED'}
@@ -3326,7 +3359,8 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     4. Average volume during consolidation < average volume during move up
     5. Average daily range during consolidation < average daily range during move up
     6. Most recent candle is at most 1 ADR away from first consolidation candle
-    7. Consolidation starts immediately after end of move (one candle after)
+    7. Price floor: No close can dip below 80% of first consolidation candle close (20% dip filter)
+    8. Consolidation starts immediately after end of move (one candle after)
     
     Args:
         df: DataFrame with OHLCV data
@@ -3464,6 +3498,11 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     price_difference = abs(most_recent_close - first_consolidation_close)
     price_difference_adr = price_difference / first_consolidation_close * 100
     
+    # New rule: During consolidation, price at close must never dip below 80% of the first consolidation close
+    min_consolidation_close = consolidation_data['Close'].min()
+    min_close_pct_of_start = (min_consolidation_close / first_consolidation_close * 100) if first_consolidation_close != 0 else 0
+    price_floor_criterion_met = min_consolidation_close >= first_consolidation_close * 0.8
+    
     # Use 20-day ADR if provided, otherwise fallback to consolidation ADR
     stability_threshold = adr_20 if adr_20 is not None else consolidation_avg_adr
     price_criterion_met = price_difference_adr <= stability_threshold
@@ -3475,7 +3514,8 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         rolling_validation_passed and
         volume_criterion_met and
         range_criterion_met and
-        price_criterion_met
+        price_criterion_met and
+        price_floor_criterion_met
     )
     
     consolidation_details = {
@@ -3496,11 +3536,19 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         'range_criterion_met': range_criterion_met,
         'price_difference_adr': round(price_difference_adr, 2),
         'price_criterion_met': price_criterion_met,
+        'min_consolidation_close': round(min_consolidation_close, 2),
+        'min_close_pct_of_start': round(min_close_pct_of_start, 2),
+        'price_floor_criterion_met': price_floor_criterion_met,
         'stability_threshold': round(stability_threshold, 2),
         'adr_20_used': adr_20 is not None,
         'first_consolidation_close': round(first_consolidation_close, 2),
         'most_recent_close': round(most_recent_close, 2),
-        'description': f"Enhanced Consolidation: {consolidation_candles} days, first candle ADR {first_consolidation_adr:.1f}% vs move start {move_start_adr:.1f}%, rolling validation {'PASSED' if rolling_validation_passed else 'FAILED'}, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}% (excluding first candle), close diff {price_difference_adr:.1f}% (≤{stability_threshold:.1f}%)"
+        'description': (
+            f"Enhanced Consolidation: {consolidation_candles} days, first candle ADR {first_consolidation_adr:.1f}% vs move start {move_start_adr:.1f}%, "
+            f"rolling validation {'PASSED' if rolling_validation_passed else 'FAILED'}, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, "
+            f"ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}% (excluding first candle), close diff {price_difference_adr:.1f}% (≤{stability_threshold:.1f}%), "
+            f"price floor {'PASSED' if price_floor_criterion_met else 'FAILED'} (start: ${first_consolidation_close:.2f}, floor: ${first_consolidation_close * 0.8:.2f}, lowest: ${min_consolidation_close:.2f})"
+        )
     }
     
     return consolidation_found, consolidation_details

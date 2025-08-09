@@ -95,6 +95,11 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     price_difference = abs(most_recent_close - first_consolidation_close)
     price_difference_adr = price_difference / first_consolidation_close * 100
 
+    # New rule: During consolidation, price at close must never dip below 80% of the first consolidation close
+    min_consolidation_close = consolidation_data['Close'].min()
+    min_close_pct_of_start = (min_consolidation_close / first_consolidation_close * 100) if first_consolidation_close != 0 else 0
+    price_floor_criterion_met = min_consolidation_close >= first_consolidation_close * 0.8
+
     stability_threshold = adr_20 if adr_20 is not None else consolidation_avg_adr
     price_criterion_met = price_difference_adr <= stability_threshold
 
@@ -104,7 +109,8 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         rolling_validation_passed and
         volume_criterion_met and
         range_criterion_met and
-        price_criterion_met
+        price_criterion_met and
+        price_floor_criterion_met
     )
 
     consolidation_details = {
@@ -125,10 +131,19 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         'range_criterion_met': range_criterion_met,
         'price_difference_adr': round(price_difference_adr, 2),
         'price_criterion_met': price_criterion_met,
+        'min_consolidation_close': round(min_consolidation_close, 2),
+        'min_close_pct_of_start': round(min_close_pct_of_start, 2),
+        'price_floor_criterion_met': price_floor_criterion_met,
         'stability_threshold': round(stability_threshold, 2),
         'adr_20_used': adr_20 is not None,
         'first_consolidation_close': round(first_consolidation_close, 2),
         'most_recent_close': round(most_recent_close, 2),
+        'description': (
+            f"Enhanced Consolidation: {consolidation_candles} days, first candle ADR {first_consolidation_adr:.1f}% vs move start {move_start_adr:.1f}%, "
+            f"rolling validation {'PASSED' if rolling_validation_passed else 'FAILED'}, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, "
+            f"ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}% (excluding first candle), close diff {price_difference_adr:.1f}% (≤{stability_threshold:.1f}%), "
+            f"price floor {'PASSED' if price_floor_criterion_met else 'FAILED'} (start: ${first_consolidation_close:.2f}, floor: ${first_consolidation_close * 0.8:.2f}, lowest: ${min_consolidation_close:.2f})"
+        )
     }
 
     return consolidation_found, consolidation_details 

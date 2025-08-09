@@ -179,7 +179,7 @@ export default function Analytics() {
   const getCriteriaName = (key: string) => {
     const names = {
       criterion1: 'Large Momentum Move (LOW to HIGH ≥3x ADR)',
-      criterion2_3: 'Multi-Phase Consolidation Analysis',
+      criterion2_3: 'Consolidation Pattern (incl. 80% price floor)',
       criterion4: 'Current Price Above 50-Day Moving Average',
       criterion5: 'Optimal Volatility Range (3-20% ADR)'
     }

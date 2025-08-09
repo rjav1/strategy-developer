@@ -271,22 +271,48 @@ def check_momentum_pattern(hist_data: pd.DataFrame, stock_symbol: str | None = N
         criteria_details['criterion5'] = {'met': False, 'adr_20': 0, 'min_adr': 3.0, 'max_adr': 20.0}
 
     if len(df) >= 20:
+        # Calculate average volume over recent period (last 20 days) - using ALL data
         recent_volume_data = df.tail(20)
-        avg_volume = recent_volume_data['Volume'].mean()
-        avg_price = recent_volume_data['Close'].mean()
+        volume_data = recent_volume_data['Volume']
+        price_data = recent_volume_data['Close']
+        
+        # Part 1: Standard volume calculation (using all data)
+        avg_volume = volume_data.mean()
+        avg_price = price_data.mean()
         avg_dollar_volume = avg_volume * avg_price
         volume_threshold = 1_000_000
-        criteria_met['criterion6'] = avg_dollar_volume >= volume_threshold
+        volume_meets_threshold = avg_dollar_volume >= volume_threshold
+        
+        # Part 2: Anomaly detection (flag if any anomalies exist)
+        volume_mean = volume_data.mean()
+        volume_std = volume_data.std()
+        anomalies_detected = 0
+        no_anomalies = True
+        
+        if volume_std > 0:
+            z_scores = abs((volume_data - volume_mean) / volume_std)
+            # Detect extreme volume spikes (Z-score > 3.0)
+            anomaly_mask = z_scores > 3.0
+            anomalies_detected = anomaly_mask.sum()
+            no_anomalies = anomalies_detected == 0
+        
+        # Both parts must pass for criterion 6 to pass
+        criteria_met['criterion6'] = volume_meets_threshold and no_anomalies
+        
         criteria_details['criterion6'] = {
             'met': criteria_met['criterion6'],
+            'volume_meets_threshold': volume_meets_threshold,
+            'no_anomalies': no_anomalies,
             'avg_dollar_volume': round(avg_dollar_volume, 0),
             'threshold': volume_threshold,
             'avg_volume': round(avg_volume, 0),
             'avg_price': round(avg_price, 2),
+            'anomalies_detected': int(anomalies_detected),
+            'total_days_analyzed': len(recent_volume_data),
         }
     else:
         criteria_met['criterion6'] = False
-        criteria_details['criterion6'] = {'met': False, 'avg_dollar_volume': 0, 'threshold': 1_000_000, 'avg_volume': 0, 'avg_price': 0}
+        criteria_details['criterion6'] = {'met': False, 'volume_meets_threshold': False, 'no_anomalies': True, 'avg_dollar_volume': 0, 'threshold': 1_000_000, 'avg_volume': 0, 'avg_price': 0, 'anomalies_detected': 0, 'total_days_analyzed': 0}
 
     # Sector strength handled externally where needed
 

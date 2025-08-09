@@ -35,9 +35,12 @@ async def analyze_momentum_pattern(symbol: str, period: str = Query("3mo", regex
         symbol=symbol.upper(),
         pattern_found=pattern_found,
         confidence_score=confidence_score,
-        analysis_report=None,
+        analysis_report=(
+            f"Consolidation analysis: {('PASSED' if criteria_details.get('criterion2_3', {}).get('met', False) else 'FAILED')} - "
+            f"{criteria_details.get('criterion2_3', {}).get('description', 'No details')}"
+        ),
         chart_image_base64=None,
-        criteria_details=None,
+        criteria_details=criteria_details,
         total_criteria_met=sum(v.get('met', False) if isinstance(v, dict) else False for v in criteria_details.values()),
         pattern_strength=strength,
         criteria_met={

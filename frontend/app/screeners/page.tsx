@@ -1160,7 +1160,7 @@ export default function Screeners() {
                           };
                           const descriptions = {
                             'large_move': 'Move from LOW of start day to HIGH of end day must exceed 3x ADR',
-                            'consolidation': '4 criteria: ≥3 candles, lower volume vs move, lower ADR vs move, price stability ≤1.5% ADR',
+                            'consolidation': '6 criteria: ≥3 candles, lower volume vs move, lower ADR vs move, price stability ≤ ADR threshold, no close dips below 80% of consolidation start close, and rolling validation',
                             'above_50_sma': 'Most recent closing price must be above 50-day Simple Moving Average',
                             'adr_range': 'Average Daily Range over last 20 days must be between 3% and 20%'
                           };
