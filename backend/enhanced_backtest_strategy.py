@@ -58,46 +58,69 @@ except ImportError as e:
     PRODUCTION_SCREENER_AVAILABLE = False
 
 def fetch_ohlcv(symbol: str, period_str: str) -> pd.DataFrame:
-    """Fetch OHLCV data using yfinance with enhanced data preparation"""
-    try:
-        print(f"🔍 DEBUG fetch_ohlcv: symbol={symbol}, period_str={period_str}")
-        
-        print(f"🔧 DEBUG fetch_ohlcv: Creating yf.Ticker({symbol})")
-        ticker = yf.Ticker(symbol)
-        
-        print(f"🔧 DEBUG fetch_ohlcv: Calling ticker.history(period={period_str})")
-        data = ticker.history(period=period_str)
-        
-        print(f"🔧 DEBUG fetch_ohlcv: Raw data shape: {data.shape if not data.empty else 'EMPTY'}")
-        
-        if data.empty:
-            print(f"❌ DEBUG fetch_ohlcv: Data is empty, returning empty DataFrame")
+    """Fetch OHLCV data using yfinance with enhanced data preparation and timeout protection"""
+    import concurrent.futures
+    
+    def _fetch_data_inner():
+        """Inner function to fetch data with timeout protection"""
+        try:
+            print(f"🔍 DEBUG fetch_ohlcv: symbol={symbol}, period_str={period_str}")
+            
+            print(f"🔧 DEBUG fetch_ohlcv: Creating yf.Ticker({symbol})")
+            ticker = yf.Ticker(symbol)
+            
+            print(f"🔧 DEBUG fetch_ohlcv: Calling ticker.history(period={period_str}, timeout=15)")
+            # Add timeout parameter to prevent hanging
+            data = ticker.history(period=period_str, timeout=15)
+            
+            print(f"🔧 DEBUG fetch_ohlcv: Raw data shape: {data.shape if not data.empty else 'EMPTY'}")
+            
+            if data.empty:
+                print(f"❌ DEBUG fetch_ohlcv: Data is empty, returning empty DataFrame")
+                return pd.DataFrame()
+            
+            print(f"🔧 DEBUG fetch_ohlcv: Raw data columns: {list(data.columns)}")
+            print(f"🔧 DEBUG fetch_ohlcv: Raw data date range: {data.index[0]} to {data.index[-1]}")
+            
+            # Prepare data with all required fields for momentum screening
+            print(f"🔧 DEBUG fetch_ohlcv: Preparing enhanced data...")
+            data = data.copy()
+            data['SMA10'] = data['Close'].rolling(window=10).mean()
+            data['SMA20'] = data['Close'].rolling(window=20).mean()
+            data['SMA50'] = data['Close'].rolling(window=50).mean()
+            data['ATR'] = calculate_atr(data) if PRODUCTION_SCREENER_AVAILABLE else data['Close'].rolling(window=14).std()
+            
+            # Additional fields required by momentum screener
+            data['daily_range_pct'] = (data['High'] - data['Low']) / data['Open'] * 100
+            data['ADR_20'] = data['daily_range_pct'].rolling(window=20).mean()
+            data['body_size_pct'] = abs(data['Close'] - data['Open']) / data['Open'] * 100
+            data['volume_sma'] = data['Volume'].rolling(window=50).mean()
+            
+            print(f"✅ DEBUG fetch_ohlcv: Successfully prepared {len(data)} rows with {len(data.columns)} columns")
+            print(f"🔧 DEBUG fetch_ohlcv: Final columns: {list(data.columns)}")
+            
+            return data
+            
+        except Exception as e:
+            print(f"❌ DEBUG fetch_ohlcv: Inner exception for {symbol}: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"❌ DEBUG fetch_ohlcv: Full traceback: {traceback.format_exc()}")
             return pd.DataFrame()
-        
-        print(f"🔧 DEBUG fetch_ohlcv: Raw data columns: {list(data.columns)}")
-        print(f"🔧 DEBUG fetch_ohlcv: Raw data date range: {data.index[0]} to {data.index[-1]}")
-        
-        # Prepare data with all required fields for momentum screening
-        print(f"🔧 DEBUG fetch_ohlcv: Preparing enhanced data...")
-        data = data.copy()
-        data['SMA10'] = data['Close'].rolling(window=10).mean()
-        data['SMA20'] = data['Close'].rolling(window=20).mean()
-        data['SMA50'] = data['Close'].rolling(window=50).mean()
-        data['ATR'] = calculate_atr(data) if PRODUCTION_SCREENER_AVAILABLE else data['Close'].rolling(window=14).std()
-        
-        # Additional fields required by momentum screener
-        data['daily_range_pct'] = (data['High'] - data['Low']) / data['Open'] * 100
-        data['ADR_20'] = data['daily_range_pct'].rolling(window=20).mean()
-        data['body_size_pct'] = abs(data['Close'] - data['Open']) / data['Open'] * 100
-        data['volume_sma'] = data['Volume'].rolling(window=50).mean()
-        
-        print(f"✅ DEBUG fetch_ohlcv: Successfully prepared {len(data)} rows with {len(data.columns)} columns")
-        print(f"🔧 DEBUG fetch_ohlcv: Final columns: {list(data.columns)}")
-        
-        return data
+    
+    try:
+        # Execute with ThreadPoolExecutor timeout to prevent hanging
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(_fetch_data_inner)
+            try:
+                # Wait max 25 seconds for data fetch and processing
+                result = future.result(timeout=25)
+                return result
+            except concurrent.futures.TimeoutError:
+                print(f"⏰ DEBUG fetch_ohlcv: Timeout fetching data for {symbol} after 25 seconds")
+                return pd.DataFrame()
         
     except Exception as e:
-        print(f"❌ DEBUG fetch_ohlcv: Exception for {symbol}: {type(e).__name__}: {str(e)}")
+        print(f"❌ DEBUG fetch_ohlcv: Outer exception for {symbol}: {type(e).__name__}: {str(e)}")
         import traceback
         print(f"❌ DEBUG fetch_ohlcv: Full traceback: {traceback.format_exc()}")
         return pd.DataFrame()

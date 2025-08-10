@@ -227,56 +227,218 @@ async def run_multi_symbol_backtest(request: dict):
 
 
 async def _process_multi_symbol_backtest(job_id: str, symbols: list, period: str, initial_capital: float):
+    """Background task to process multi-symbol backtest with improved error handling and rate limiting"""
     try:
         from enhanced_backtest_strategy import EnhancedMomentumBacktester
+        import asyncio
+        
         individual_results = {}
+        total_symbols = len(symbols)
+        
+        print(f"🚀 Starting multi-symbol backtest for {total_symbols} symbols: {symbols[:5]}{'...' if total_symbols > 5 else ''}")
+        
         for i, symbol in enumerate(symbols):
             try:
+                # Update progress at start of each symbol
                 backtest_results[job_id].update({
-                    "progress": round((i / len(symbols)) * 100, 1),
-                    "message": f"Testing {symbol}... ({i+1}/{len(symbols)})",
+                    "progress": round((i / total_symbols) * 100, 1),
+                    "message": f"Testing {symbol}... ({i+1}/{total_symbols})",
                     "current_symbol": symbol,
                     "symbols_completed": i,
-                    "symbols_total": len(symbols),
+                    "symbols_total": total_symbols,
                     "candle_progress": 0,
                     "candle_total": 0
                 })
-                backtester = EnhancedMomentumBacktester(ticker=symbol.upper(), period=period, initial_capital=initial_capital)
-                fetch_result = await backtester.fetch_data()
-                if not fetch_result:
-                    individual_results[symbol] = {"success": False, "error": f"Could not fetch data for {symbol}", "results": {}, "trades": []}
+                
+                print(f"📊 Processing symbol {i+1}/{total_symbols}: {symbol}")
+                
+                # Add rate limiting delay to avoid overwhelming Yahoo Finance
+                if i > 0:
+                    print(f"⏱️ Rate limiting delay for {symbol}...")
+                    await asyncio.sleep(0.5)  # 500ms delay between symbols
+                
+                # Initialize backtester with error handling
+                try:
+                    backtester = EnhancedMomentumBacktester(
+                        ticker=symbol.upper(), 
+                        period=period, 
+                        initial_capital=initial_capital
+                    )
+                    print(f"✅ Backtester created for {symbol}")
+                except Exception as init_error:
+                    print(f"❌ Failed to initialize backtester for {symbol}: {str(init_error)}")
+                    individual_results[symbol] = {
+                        "success": False, 
+                        "error": f"Failed to initialize backtester: {str(init_error)}", 
+                        "results": {}, 
+                        "trades": []
+                    }
                     continue
+                
+                # Fetch data with timeout and error handling
+                try:
+                    print(f"🔍 Fetching data for {symbol}...")
+                    fetch_result = await asyncio.wait_for(
+                        backtester.fetch_data(), 
+                        timeout=30  # 30-second timeout per symbol
+                    )
+                    print(f"📈 Data fetch result for {symbol}: {fetch_result}")
+                except asyncio.TimeoutError:
+                    print(f"⏰ Timeout fetching data for {symbol}")
+                    individual_results[symbol] = {
+                        "success": False, 
+                        "error": f"Timeout fetching data for {symbol}", 
+                        "results": {}, 
+                        "trades": []
+                    }
+                    continue
+                except Exception as fetch_error:
+                    print(f"❌ Error fetching data for {symbol}: {str(fetch_error)}")
+                    individual_results[symbol] = {
+                        "success": False, 
+                        "error": f"Could not fetch data for {symbol}: {str(fetch_error)}", 
+                        "results": {}, 
+                        "trades": []
+                    }
+                    continue
+                
+                if not fetch_result:
+                    print(f"❌ No data returned for {symbol}")
+                    individual_results[symbol] = {
+                        "success": False, 
+                        "error": f"Could not fetch data for {symbol} - no data returned", 
+                        "results": {}, 
+                        "trades": []
+                    }
+                    continue
+                
+                # Define progress callback
                 def update_progress(progress: float, message: str):
                     try:
-                        backtest_results[job_id].update({"candle_progress": round(progress, 1), "candle_total": 100, "message": f"{symbol}: {message}"})
+                        backtest_results[job_id].update({
+                            "candle_progress": round(progress, 1), 
+                            "candle_total": 100, 
+                            "message": f"{symbol}: {message}"
+                        })
                     except Exception:
                         pass
-                simulation_result = await backtester.run_simulation(progress_callback=update_progress)
-                if not simulation_result:
-                    individual_results[symbol] = {"success": False, "error": f"Simulation failed for {symbol}", "results": {}, "trades": []}
+                
+                # Run simulation with timeout and error handling
+                try:
+                    print(f"🔄 Running simulation for {symbol}...")
+                    simulation_result = await asyncio.wait_for(
+                        backtester.run_simulation(progress_callback=update_progress),
+                        timeout=60  # 60-second timeout per simulation
+                    )
+                    print(f"🎯 Simulation result for {symbol}: {simulation_result}")
+                except asyncio.TimeoutError:
+                    print(f"⏰ Timeout during simulation for {symbol}")
+                    individual_results[symbol] = {
+                        "success": False, 
+                        "error": f"Timeout during simulation for {symbol}", 
+                        "results": {}, 
+                        "trades": []
+                    }
                     continue
-                results = backtester.generate_results()
-                individual_results[symbol] = make_json_serializable({"success": True, "results": results.get("results", {}), "error": results.get("error")})
+                except Exception as sim_error:
+                    print(f"❌ Error during simulation for {symbol}: {str(sim_error)}")
+                    individual_results[symbol] = {
+                        "success": False, 
+                        "error": f"Simulation failed for {symbol}: {str(sim_error)}", 
+                        "results": {}, 
+                        "trades": []
+                    }
+                    continue
+                
+                if not simulation_result:
+                    print(f"❌ Simulation failed for {symbol}")
+                    individual_results[symbol] = {
+                        "success": False, 
+                        "error": f"Simulation failed for {symbol} - no result returned", 
+                        "results": {}, 
+                        "trades": []
+                    }
+                    continue
+                
+                # Generate results with error handling
+                try:
+                    print(f"📊 Generating results for {symbol}...")
+                    results = backtester.generate_results()
+                    print(f"✅ Results generated for {symbol}")
+                    
+                    individual_results[symbol] = make_json_serializable({
+                        "success": True, 
+                        "results": results.get("results", {}), 
+                        "error": results.get("error"),
+                        "trades": results.get("trades", [])
+                    })
+                    
+                except Exception as results_error:
+                    print(f"❌ Error generating results for {symbol}: {str(results_error)}")
+                    individual_results[symbol] = {
+                        "success": False, 
+                        "error": f"Failed to generate results for {symbol}: {str(results_error)}", 
+                        "results": {}, 
+                        "trades": []
+                    }
+                    continue
+                
+                # Update progress after successful completion
                 backtest_results[job_id].update({
-                    "progress": round(((i + 1) / len(symbols)) * 100, 1),
-                    "message": f"Completed {symbol}... ({i+1}/{len(symbols)})",
+                    "progress": round(((i + 1) / total_symbols) * 100, 1),
+                    "message": f"Completed {symbol}... ({i+1}/{total_symbols})",
                     "current_symbol": symbol,
                     "symbols_completed": i + 1,
-                    "symbols_total": len(symbols),
+                    "symbols_total": total_symbols,
                     "candle_progress": 100,
                     "candle_total": 100,
-                    "live_results": make_json_serializable(results)
+                    "live_results": make_json_serializable(results) if 'results' in locals() else None
                 })
-            except Exception as e:
-                individual_results[symbol] = {"success": False, "error": f"Error processing {symbol}: {str(e)}", "results": {}, "trades": []}
-        # Combine results similar to legacy behavior
+                
+                print(f"✅ Successfully completed {symbol} ({i+1}/{total_symbols})")
+                
+            except Exception as symbol_error:
+                print(f"❌ Unexpected error processing {symbol}: {str(symbol_error)}")
+                individual_results[symbol] = {
+                    "success": False, 
+                    "error": f"Error processing {symbol}: {str(symbol_error)}", 
+                    "results": {}, 
+                    "trades": []
+                }
+                continue
+        
+        # Calculate summary statistics
+        successful_symbols = [s for s, r in individual_results.items() if r.get("success", False)]
+        failed_symbols = [s for s, r in individual_results.items() if not r.get("success", False)]
+        
+        print(f"🎉 Multi-symbol backtest completed!")
+        print(f"✅ Successful: {len(successful_symbols)}/{total_symbols}")
+        print(f"❌ Failed: {len(failed_symbols)}/{total_symbols}")
+        if failed_symbols:
+            print(f"Failed symbols: {failed_symbols[:10]}{'...' if len(failed_symbols) > 10 else ''}")
+        
+        # Final update
         backtest_results[job_id].update({
             "status": "completed",
             "progress": 100,
-            "message": "Multi-symbol backtest completed successfully",
+            "message": f"Multi-symbol backtest completed! {len(successful_symbols)}/{total_symbols} successful",
             "individual_results": individual_results,
             "combined_results": {"results": {}},
-            "results": {"results": {}}
+            "results": {"results": {}},
+            "summary": {
+                "total_symbols": total_symbols,
+                "successful_symbols": len(successful_symbols),
+                "failed_symbols": len(failed_symbols),
+                "success_rate": round((len(successful_symbols) / total_symbols) * 100, 1) if total_symbols > 0 else 0
+            }
         })
+        
     except Exception as e:
-        backtest_results[job_id].update({"status": "error", "message": f"Multi-symbol backtest failed: {str(e)}"}) 
+        print(f"❌ Critical error in multi-symbol backtest: {str(e)}")
+        import traceback
+        print(f"Full traceback: {traceback.format_exc()}")
+        backtest_results[job_id].update({
+            "status": "error", 
+            "message": f"Multi-symbol backtest failed: {str(e)}",
+            "error_details": str(e)
+        }) 
