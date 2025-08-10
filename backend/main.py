@@ -1800,8 +1800,26 @@ async def screen_momentum_stream(request: ScreeningRequest):
                     yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Insufficient data for {clean_symbol}'})}\n\n"
                     continue
                 
-                # Run momentum analysis using updated function
-                pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist, clean_symbol)
+                # Run momentum analysis using updated function with timeout protection
+                try:
+                    pattern_found, criteria_details, confidence_score = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: check_momentum_pattern(hist, clean_symbol)
+                        ),
+                        timeout=10  # 10-second timeout for momentum pattern analysis
+                    )
+                except asyncio.TimeoutError:
+                    print(f"⏰ Timeout during momentum analysis for {clean_symbol}")
+                    processed_count += 1
+                    percent = int((processed_count / total_symbols) * 100)
+                    yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Timeout analyzing {clean_symbol}'})}\n\n"
+                    continue
+                except Exception as analysis_error:
+                    print(f"❌ Error during momentum analysis for {clean_symbol}: {analysis_error}")
+                    processed_count += 1
+                    percent = int((processed_count / total_symbols) * 100)
+                    yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Error analyzing {clean_symbol}'})}\n\n"
+                    continue
                 
                 # Get company name with timeout protection
                 try:
@@ -1852,9 +1870,27 @@ async def screen_momentum_stream(request: ScreeningRequest):
                 if total_met >= 3 or request.include_bad_setups:  # At least 3 out of 6 criteria met OR include bad setups
                     results.append(result)
                     message = f"Found pattern in {clean_symbol} ({total_met}/6 criteria)" if total_met >= 3 else f"Bad setup in {clean_symbol} ({total_met}/6 criteria)"
-                    yield f"data: {json.dumps({'type': 'result', 'result': result.dict(), 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': message})}\n\n"
+                    
+                    # Serialize result.dict() with timeout protection
+                    try:
+                        result_dict = await asyncio.wait_for(
+                            asyncio.get_event_loop().run_in_executor(
+                                None, lambda: result.dict()
+                            ),
+                            timeout=2  # 2-second timeout for result serialization
+                        )
+                        yield f"data: {json.dumps({'type': 'result', 'result': result_dict, 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': message})}\n\n"
+                    except asyncio.TimeoutError:
+                        print(f"⏰ Timeout serializing result for {clean_symbol}")
+                        yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Serialization timeout for {clean_symbol}'})}\n\n"
+                    except Exception as serialize_error:
+                        print(f"❌ Error serializing result for {clean_symbol}: {serialize_error}")
+                        yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Serialization error for {clean_symbol}'})}\n\n"
                 else:
                     yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'No pattern found in {clean_symbol}'})}\n\n"
+                
+                # Yield control to event loop after each symbol to keep stream responsive
+                await asyncio.sleep(0)
                 
             except Exception as e:
                 processed_count += 1
