@@ -41,7 +41,7 @@ export default function BacktestEngine() {
   const [watchlists, setWatchlists] = useState<any[]>([])
   const [selectedWatchlist, setSelectedWatchlist] = useState<string>('')
   const [customSymbols, setCustomSymbols] = useState('ALAB')
-  const [dataSource, setDataSource] = useState<'watchlist' | 'custom'>('custom')
+  const [dataSource, setDataSource] = useState<'watchlist' | 'custom' | 'market'>('custom')
   const [showCustomSymbols, setShowCustomSymbols] = useState(false)
   const [strategies, setStrategies] = useState<any[]>([])
   const [loadingStrategies, setLoadingStrategies] = useState(false)
@@ -352,7 +352,7 @@ export default function BacktestEngine() {
   const startMultiSymbolBacktest = async (symbols: string[], shouldClearLogs: boolean) => {
     setIsRunning(true)
     setProgress(0)
-    setCurrentTicker(`Testing ${symbols.length} symbols...`)
+    setCurrentTicker(dataSource === 'market' ? 'Testing full market...' : `Testing ${symbols.length} symbols...`)
     setBacktestResult(null)
     setSelectedTickerForBacktest('')
     setBacktestPhase('Starting multi-symbol backtest...')
@@ -405,31 +405,32 @@ export default function BacktestEngine() {
             setProgress(progressData.progress || 0)
             
             // Multi: update symbol and candle-level progress if present
-            if (backtestType === 'multi') {
-              setSymbolsCompleted(progressData.symbols_completed || 0)
-              setSymbolsTotal(progressData.symbols_total || symbols.length)
-              setCandleProgress(progressData.candle_progress || 0)
-              setCandleTotal(progressData.candle_total || 100)
-              
-              // Update live results if available (enrich with individual_results for per-symbol cards)
-              if (progressData.live_results) {
-                const enrichedLiveResults = {
-                  ...progressData.live_results,
-                  // Attach the latest individual_results so symbol cards can display metrics
-                  individual_results: progressData.individual_results || {}
+              if (backtestType === 'multi') {
+                setSymbolsCompleted(progressData.symbols_completed || 0)
+                setSymbolsTotal(progressData.symbols_total || (dataSource === 'market' ? progressData.symbols_total : symbols.length))
+                setCandleProgress(progressData.candle_progress || 0)
+                setCandleTotal(progressData.candle_total || 100)
+                
+                // Update cumulative live portfolio metrics + individual symbol results
+                const cumulative = progressData.live_results || progressData.results || null
+                const individuals = progressData.individual_results || {}
+                if (cumulative || Object.keys(individuals).length > 0) {
+                  const enrichedLiveResults = {
+                    ...(cumulative || {}),
+                    individual_results: individuals
+                  }
+                  setLiveResults(enrichedLiveResults)
                 }
-                setLiveResults(enrichedLiveResults)
               }
-            }
             
             // Update phase and current ticker message
             if (progressData.message) {
               setBacktestPhase(progressData.message)
-              setCurrentTicker(progressData.current_symbol || `Multi-symbol: ${progressData.message}`)
+              setCurrentTicker(progressData.current_symbol || (dataSource === 'market' ? `Full market: ${progressData.message}` : `Multi-symbol: ${progressData.message}`))
             }
             
                           // Stop as soon as backend reports completion
-              if (progressData.status === 'completed') {
+              if (progressData.status === 'completed' || progressData.status === 'cancelled') {
                 if (progressIntervalRef.current) {
                   clearInterval(progressIntervalRef.current)
                   progressIntervalRef.current = null
@@ -451,7 +452,7 @@ export default function BacktestEngine() {
                 setBacktestResult(enrichedCombined)
                 setSelectedTickerForBacktest('Multi-Symbol Portfolio')
                 setProgress(100)
-                setBacktestPhase('Completed')
+                setBacktestPhase(progressData.status === 'cancelled' ? 'Cancelled' : 'Completed')
                 setIsRunning(false)
                 setLiveResults(null) // Clear live results when completed
                 return
@@ -511,7 +512,7 @@ export default function BacktestEngine() {
       setWatchlists((providerWatchlists as any) || [])
     }
   }
-  if (symbols.length === 0) return
+  if (symbols.length === 0 && dataSource !== 'market') return
 
     if (backtestMode === 'momentum') {
       if (backtestType === 'single') {
@@ -535,6 +536,9 @@ export default function BacktestEngine() {
       return watchlist ? watchlist.symbols : []
     } else if (dataSource === 'custom' && customSymbols) {
       return customSymbols.split(',').map(s => s.trim().toUpperCase()).filter(s => s)
+    } else if (dataSource === 'market') {
+      // For full market option, return empty to let backend default to comprehensive list
+      return []
     }
     return []
   }
@@ -587,6 +591,7 @@ export default function BacktestEngine() {
   }
 
   const selectedSymbols = getSelectedSymbols()
+  const [showTradeLog, setShowTradeLog] = useState(false)
 
   return (
     <div className={`p-6 space-y-6 ${isRunning ? 'pb-32' : ''}`}>
@@ -681,6 +686,22 @@ export default function BacktestEngine() {
                       </div>
                     </div>
                   </button>
+                  <button
+                    onClick={() => setDataSource('market')}
+                    className={`flex-1 p-3 rounded-lg text-left transition-all duration-200 ${
+                      dataSource === 'market'
+                        ? 'bg-purple-500 text-white'
+                        : 'bg-card/50 text-muted-foreground hover:bg-card/70 hover:text-white'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <BarChart3 className="h-4 w-4" />
+                      <div>
+                        <div className="font-medium text-sm">Full Market</div>
+                        <div className="text-xs opacity-75">Run on all NASDAQ stocks</div>
+                      </div>
+                    </div>
+                  </button>
                 </div>
 
                 {dataSource === 'watchlist' && (
@@ -714,6 +735,37 @@ export default function BacktestEngine() {
                         onChange={setSelectedWatchlist}
                       />
                     )}
+                  </div>
+                )}
+
+                {dataSource === 'custom' && (
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">
+                      Custom Symbols
+                    </label>
+                    <textarea
+                      value={customSymbols}
+                      onChange={(e) => setCustomSymbols(e.target.value)}
+                      placeholder="Enter symbols separated by commas (e.g., AAPL, MSFT, GOOGL)"
+                      rows={3}
+                      className="w-full px-4 py-3 bg-card/50 border border-white/10 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white"
+                    />
+                    {backtestMode === 'momentum' && backtestType === 'single' && (
+                      <p className="text-xs text-yellow-400 mt-2">
+                        Note: Single symbol mode will show detailed charts and analysis.
+                      </p>
+                    )}
+                    {backtestMode === 'momentum' && backtestType === 'multi' && (
+                      <p className="text-xs text-green-400 mt-2">
+                        Note: Multi-symbol mode will test all symbols and provide combined results.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {dataSource === 'market' && (
+                  <div className="p-3 bg-gray-800/50 border border-white/10 rounded-lg text-sm text-muted-foreground">
+                    Will run across the full market (all NASDAQ stocks). No input needed.
                   </div>
                 )}
 
@@ -896,12 +948,13 @@ export default function BacktestEngine() {
             {selectedSymbols.length === 0 ? (
               <div className="text-center py-8">
                 <Target className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                <p className="text-muted-foreground mb-2">No symbols selected</p>
+                <p className="text-muted-foreground mb-2">
+                  {dataSource === 'market' ? 'Full market will be used (all NASDAQ stocks)' : 'No symbols selected'}
+                </p>
                 <p className="text-sm text-muted-foreground">
                   {dataSource === 'watchlist' 
                     ? 'Select a watchlist to see symbols'
-                    : 'Enter custom symbols to see them here'
-                  }
+                    : dataSource === 'custom' ? 'Enter custom symbols to see them here' : 'Start to run on full market'}
                 </p>
               </div>
             ) : (
@@ -911,7 +964,7 @@ export default function BacktestEngine() {
                     {selectedSymbols.length} symbol{selectedSymbols.length !== 1 ? 's' : ''} selected
                   </span>
                   <span className="text-sm text-purple-400">
-                    {dataSource === 'watchlist' ? 'From Watchlist' : 'Custom Symbols'}
+                    {dataSource === 'watchlist' ? 'From Watchlist' : dataSource === 'custom' ? 'Custom Symbols' : 'Full Market'}
                   </span>
                 </div>
                 
@@ -945,7 +998,11 @@ export default function BacktestEngine() {
                     <div>
                       <h4 className="font-medium text-white mb-1">Ready to Backtest</h4>
                       <p className="text-sm text-muted-foreground">
-                        Your strategy will be tested on {selectedSymbols.length} symbol{selectedSymbols.length !== 1 ? 's' : ''}. 
+                        {dataSource === 'market' ? (
+                          <>Your strategy will be tested on the full market (all NASDAQ stocks).</>
+                        ) : (
+                          <>Your strategy will be tested on {selectedSymbols.length} symbol{selectedSymbols.length !== 1 ? 's' : ''}.</>
+                        )}
                         {dataSource === 'watchlist' && selectedWatchlist && (
                           <> The watchlist "{watchlists.find(w => w.id === selectedWatchlist)?.name}" will be used.</>
                         )}
@@ -963,18 +1020,18 @@ export default function BacktestEngine() {
       <div className="flex justify-center">
         <button 
           onClick={runBacktest}
-          disabled={selectedSymbols.length === 0 || !selectedStrategy || isRunning || backendStatus === 'disconnected'}
+          disabled={(dataSource !== 'market' && selectedSymbols.length === 0) || !selectedStrategy || isRunning || backendStatus === 'disconnected'}
           className="flex items-center gap-3 px-8 py-4 bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed rounded-xl font-medium transition-all duration-200 shadow-lg hover:shadow-purple-500/25 text-lg"
         >
           {isRunning ? (
             <>
               <RefreshCw className="h-6 w-6 animate-spin" />
-              {backtestType === 'multi' ? 'Running Multi-Symbol Backtest...' : 'Running Backtest...'}
+              {backtestType === 'multi' ? (dataSource === 'market' ? 'Running Full-Market Backtest...' : 'Running Multi-Symbol Backtest...') : 'Running Backtest...'}
             </>
           ) : (
             <>
               <Play className="h-6 w-6" />
-              {backtestType === 'multi' ? `Run Multi-Symbol Backtest (${selectedSymbols.length} symbols)` : 'Run Backtest'}
+              {backtestType === 'multi' ? (dataSource === 'market' ? 'Run Multi-Symbol Backtest (Full Market)' : `Run Multi-Symbol Backtest (${selectedSymbols.length} symbols)`) : 'Run Backtest'}
             </>
           )}
         </button>
@@ -1005,6 +1062,30 @@ export default function BacktestEngine() {
           <div className="flex items-center justify-between">
             <h2 className="text-2xl font-bold text-white">{isRunning && backtestType === 'multi' ? 'Backtest Running' : 'Backtest Complete'}</h2>
             <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setShowTradeLog((s) => !s)}
+                className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
+              >
+                <BarChart3 className="h-4 w-4" />
+                {showTradeLog ? 'Hide Trade Log' : 'Show Trade Log'}
+              </button>
+              {isRunning && backtestType === 'multi' && jobId && (
+                <button
+                  onClick={async () => {
+                    try {
+                      await fetch(`http://localhost:8000/backtest/multi-symbol/${jobId}/cancel`, { method: 'POST' })
+                    } catch {}
+                    if (progressIntervalRef.current) { clearInterval(progressIntervalRef.current as any); progressIntervalRef.current = null }
+                    if (maxTimeoutRef.current) { clearTimeout(maxTimeoutRef.current as any); maxTimeoutRef.current = null }
+                    setIsRunning(false)
+                    setBacktestPhase('Cancelled')
+                  }}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                  Cancel Running
+                </button>
+              )}
               <button 
                 onClick={exportResults}
                 className="flex items-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
@@ -1047,6 +1128,26 @@ export default function BacktestEngine() {
                 />
               </>
             )
+          )}
+
+          {showTradeLog && (
+            <div className="card-glow p-4">
+              <h4 className="text-lg font-medium text-white mb-3">Live Trade Log</h4>
+              <div className="space-y-2 max-h-80 overflow-auto">
+                {Object.entries((liveResults?.individual_results || backtestResult?.individual_results || {})).flatMap(([symbol, payload]: any) => {
+                  const trades = payload?.trades || []
+                  return trades.map((t: any, idx: number) => (
+                    <div key={`${symbol}-${idx}`} className="flex items-center justify-between text-sm p-2 rounded-lg bg-gray-800/50 border border-white/10">
+                      <div className="flex-1 text-white">{symbol}</div>
+                      <div className="w-32 text-gray-300">{t.entry_date?.slice(0,10)} → {t.exit_date?.slice(0,10) || '-'}</div>
+                      <div className="w-28 text-gray-300">${t.entry_price?.toFixed?.(2) ?? t.entry_price}</div>
+                      <div className={`w-24 ${((t.pnl||0) >= 0)?'text-green-400':'text-red-400'}`}>${(t.pnl||0).toFixed(2)}</div>
+                      <div className="w-24 text-gray-400">{t.entry_reason || ''}</div>
+                    </div>
+                  ))
+                })}
+              </div>
+            </div>
           )}
 
           {/* Performance Results - Only for single symbol */}

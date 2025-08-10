@@ -60,9 +60,27 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
 
   // Coalesce results to an empty object while running or before first payload arrives
   const safe = results || {}
-  const metrics = (safe && safe.results) ? safe.results : {}
+  const metrics = (safe && safe.results) ? safe.results : (safe.live_results?.results || {})
   // Backend returns individual_results (primary) and may attach individual_breakdown in error cases
   const individual = safe.individual_results || safe.individual_breakdown || {}
+  const allSymbols = Object.keys(individual)
+  const grouped = {
+    profitable: [] as string[],
+    unprofitable: [] as string[],
+    no_trades: [] as string[],
+    failed: [] as string[],
+  }
+  for (const s of allSymbols) {
+    const r = individual[s]
+    const status = r?.status || (r?.results?.total_trades ? 'completed' : 'no_trades')
+    if (status === 'failed') grouped.failed.push(s)
+    else if (status === 'no_trades') grouped.no_trades.push(s)
+    else {
+      const pnl = r?.results?.total_pnl || 0
+      if (pnl >= 0) grouped.profitable.push(s)
+      else grouped.unprofitable.push(s)
+    }
+  }
   const symbolsPassed = safe.symbols_passed || []
   const symbolsProfitable = (safe.symbols_profitable || []).filter((s: string) => {
     const r = individual[s]
@@ -167,6 +185,14 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
   // Portfolio Summary Cards
   const portfolioCards = [
     {
+      title: 'Live Capital',
+      value: `$${(metrics.portfolio_capital ?? (metrics.total_initial_capital || 0) + (metrics.total_pnl || 0)).toLocaleString?.() || (metrics.portfolio_capital ?? ((metrics.total_initial_capital || 0) + (metrics.total_pnl || 0)))}`,
+      change: `Start: $${(metrics.total_initial_capital || 0).toLocaleString?.() || (metrics.total_initial_capital || 0)}`,
+      icon: DollarSign,
+      color: 'text-blue-400',
+      bgColor: 'bg-blue-500/10'
+    },
+    {
       title: 'Total P&L',
       value: `$${metrics.total_pnl?.toFixed(2) || '0.00'}`,
       change: `${metrics.total_return_pct?.toFixed(2) || '0.00'}%`,
@@ -244,7 +270,8 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
             <div>
               <h2 className="text-2xl font-bold text-white">Portfolio Performance</h2>
               <p className="text-muted-foreground">
-                Multi-Symbol Backtest • {period} • ${metrics.total_initial_capital?.toLocaleString() || '0'} Initial Capital
+                Multi-Symbol Backtest • {period} • ${metrics.total_initial_capital?.toLocaleString() || '0'} Initial Capital • Live Capital: $ {(metrics.portfolio_capital ?? (metrics.total_initial_capital || 0) + (metrics.total_pnl || 0)).toLocaleString?.() || (metrics.portfolio_capital ?? ((metrics.total_initial_capital || 0) + (metrics.total_pnl || 0)))}
+                {isRunning && <span className="ml-2 text-xs text-gray-400">(Live)</span>}
               </p>
             </div>
           </div>
@@ -389,161 +416,85 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
             </div>
             <h3 className="text-xl font-semibold text-white">Individual Symbol Results</h3>
           </div>
-          <button 
-            onClick={() => toggleSection('individual')}
-            className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
-          >
-            {expandedSections.individual ? <ChevronUp className="h-5 w-5 text-gray-400" /> : <ChevronDown className="h-5 w-5 text-gray-400" />}
-          </button>
         </div>
 
-        {expandedSections.individual && (
-          <div className="space-y-4">
-            {/* Profitable Symbols */}
-            {symbolsProfitable.length > 0 && (
-              <div>
-                <h4 className="text-lg font-medium text-green-400 mb-3">Profitable Symbols ({symbolsProfitable.length})</h4>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {symbolsProfitable.map((symbol: string) => {
-                    const result = individual[symbol]
-                    const symbolMetrics = result?.results || {}
-                    return (
-                      <div key={symbol} className={`p-4 rounded-lg border ${ (individual[symbol]?.status === 'no_trades') ? 'bg-green-500/5 border-green-500/10 opacity-70' : 'bg-green-500/5 border-green-500/20' }`}>
-                        <div className="flex items-center justify-between mb-3">
-                          <h5 className="font-semibold text-white text-lg flex items-center gap-2">
-                            {symbol}
-                            <button
-                              title="View chart"
-                              className="p-1 rounded hover:bg-white/10 transition-colors"
-                              onClick={() => openSymbolChart(symbol)}
-                            >
-                              <LineChart className="h-4 w-4 text-purple-400" />
-                            </button>
-                          </h5>
-                          <div className="text-right">
-                            <div className="text-green-400 font-medium">${symbolMetrics.total_pnl?.toFixed(2) || '0.00'}</div>
-                            <div className="text-sm text-muted-foreground">{symbolMetrics.total_return_pct?.toFixed(2) || '0.00'}%</div>
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-3 gap-4 text-sm">
-                          <div>
-                            <div className="text-muted-foreground">Trades</div>
-                            <div className="text-white font-medium">{individual[symbol]?.trades ?? symbolMetrics.total_trades ?? 0}</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">Win Rate</div>
-                            <div className="text-white font-medium">{symbolMetrics.win_rate?.toFixed(1) || '0.0'}%</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">Profit Factor</div>
-                            <div className="text-white font-medium">{formatProfitFactor(individual[symbol]?.profit_factor ?? symbolMetrics.profit_factor, individual[symbol]?.profit_factor_is_infinite ?? false)}</div>
-                          </div>
-                        </div>
+        {/* Live grouped sections */}
+        <div className="space-y-6">
+          {grouped.profitable.length > 0 && (
+            <div>
+              <h4 className="text-lg font-medium text-green-400 mb-2">Profitable Symbols ({grouped.profitable.length})</h4>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {grouped.profitable.map((symbol) => {
+                  const r = individual[symbol]
+                  const m = r?.results || {}
+                  return (
+                    <div key={symbol} className="p-3 rounded-lg border bg-green-500/5 border-green-500/20">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-medium text-white">{symbol}</span>
+                        <span className="text-green-400 text-sm">${(m.total_pnl || 0).toFixed(2)}</span>
                       </div>
-                    )
-                  })}
-                </div>
+                      <div className="text-xs text-muted-foreground">Trades: {m.total_trades || 0} • Win rate: {(m.win_rate || 0).toFixed(1)}%</div>
+                    </div>
+                  )
+                })}
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Unprofitable Symbols */}
-            {symbolsUnprofitable.length > 0 && (
-              <div>
-                <h4 className="text-lg font-medium text-red-400 mb-3">Unprofitable Symbols ({symbolsUnprofitable.length})</h4>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {symbolsUnprofitable.map((symbol: string) => {
-                    const result = individual[symbol]
-                    const symbolMetrics = result?.results || {}
-                    return (
-                      <div key={symbol} className={`p-4 rounded-lg border ${ (individual[symbol]?.status === 'no_trades') ? 'bg-red-500/5 border-red-500/10 opacity-70' : 'bg-red-500/5 border-red-500/20' }`}>
-                        <div className="flex items-center justify-between mb-3">
-                          <h5 className="font-semibold text-white text-lg flex items-center gap-2">
-                            {symbol}
-                            <button
-                              title="View chart"
-                              className="p-1 rounded hover:bg-white/10 transition-colors"
-                              onClick={() => openSymbolChart(symbol)}
-                            >
-                              <LineChart className="h-4 w-4 text-purple-400" />
-                            </button>
-                          </h5>
-                          <div className="text-right">
-                            <div className="text-red-400 font-medium">${symbolMetrics.total_pnl?.toFixed(2) || '0.00'}</div>
-                            <div className="text-sm text-muted-foreground">{symbolMetrics.total_return_pct?.toFixed(2) || '0.00'}%</div>
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-3 gap-4 text-sm">
-                          <div>
-                            <div className="text-muted-foreground">Trades</div>
-                            <div className="text-white font-medium">{individual[symbol]?.trades ?? symbolMetrics.total_trades ?? 0}</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">Win Rate</div>
-                            <div className="text-white font-medium">{symbolMetrics.win_rate?.toFixed(1) || '0.0'}%</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">Profit Factor</div>
-                            <div className="text-white font-medium">{formatProfitFactor(individual[symbol]?.profit_factor ?? symbolMetrics.profit_factor, individual[symbol]?.profit_factor_is_infinite ?? false)}</div>
-                          </div>
-                        </div>
+          {grouped.unprofitable.length > 0 && (
+            <div>
+              <h4 className="text-lg font-medium text-red-400 mb-2">Unprofitable Symbols ({grouped.unprofitable.length})</h4>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {grouped.unprofitable.map((symbol) => {
+                  const r = individual[symbol]
+                  const m = r?.results || {}
+                  return (
+                    <div key={symbol} className="p-3 rounded-lg border bg-red-500/5 border-red-500/20">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-medium text-white">{symbol}</span>
+                        <span className="text-red-400 text-sm">${(m.total_pnl || 0).toFixed(2)}</span>
                       </div>
-                    )
-                  })}
-                </div>
+                      <div className="text-xs text-muted-foreground">Trades: {m.total_trades || 0} • Win rate: {(m.win_rate || 0).toFixed(1)}%</div>
+                    </div>
+                  )
+                })}
               </div>
-            )}
+            </div>
+          )}
 
-            {/* No-trade Symbols */}
-            {symbolsNoTrades.length > 0 && (
-              <div>
-                <h4 className="text-lg font-medium text-yellow-400 mb-3">No-trade Symbols ({symbolsNoTrades.length})</h4>
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                  {symbolsNoTrades.map((symbol: string) => {
-                    const result = individual[symbol]
-                    return (
-                      <div key={symbol} className="p-3 bg-yellow-500/5 rounded-lg border border-yellow-500/20">
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-white flex items-center gap-2">
-                            {symbol}
-                            <button
-                              title="View chart"
-                              className="p-1 rounded hover:bg-white/10 transition-colors"
-                              onClick={() => openSymbolChart(symbol)}
-                            >
-                              <LineChart className="h-4 w-4 text-purple-400" />
-                            </button>
-                          </span>
-                        </div>
-                        <div className="text-sm text-yellow-300 mt-1">No trades generated</div>
-                      </div>
-                    )
-                  })}
-                </div>
+          {grouped.no_trades.length > 0 && (
+            <div>
+              <h4 className="text-lg font-medium text-yellow-400 mb-2">No-trade Symbols ({grouped.no_trades.length})</h4>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                {grouped.no_trades.map((symbol) => (
+                  <div key={symbol} className="p-3 rounded-lg border bg-yellow-500/5 border-yellow-500/20">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-white">{symbol}</span>
+                      <span className="text-yellow-300 text-xs">No trades</span>
+                    </div>
+                  </div>
+                ))}
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Failed Symbols */}
-            {symbolsFailed.length > 0 && (
-              <div>
-                <h4 className="text-lg font-medium text-red-400 mb-3">Failed Symbols ({symbolsFailed.length})</h4>
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                  {symbolsFailed.map((symbol: string) => {
-                    const result = individual[symbol]
-                    return (
-                      <div key={symbol} className="p-3 bg-red-500/5 rounded-lg border border-red-500/20">
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-white">{symbol}</span>
-                          <AlertTriangle className="h-4 w-4 text-red-400" />
-                        </div>
-                        <div className="text-sm text-red-300 mt-1" title={result?.error || ''}>{result?.error || 'Data unavailable'}</div>
-                      </div>
-                    )
-                  })}
-                </div>
+          {grouped.failed.length > 0 && (
+            <div>
+              <h4 className="text-lg font-medium text-gray-400 mb-2">Failed Symbols ({grouped.failed.length})</h4>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                {grouped.failed.map((symbol) => (
+                  <div key={symbol} className="p-3 rounded-lg border bg-gray-600/20 border-white/10">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-white">{symbol}</span>
+                      <span className="text-gray-400 text-xs">Error</span>
+                    </div>
+                    <div className="text-xs text-gray-400 truncate">{individual[symbol]?.error || 'Data unavailable'}</div>
+                  </div>
+                ))}
               </div>
-            )}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Chart Modal */}

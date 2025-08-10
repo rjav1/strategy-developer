@@ -632,7 +632,8 @@ class EnhancedMomentumBacktester:
                 'risk_amount': actual_risk_amount,
                 'risk_percentage': risk_percentage,
                 'risk_per_share': risk_per_share,
-                'portfolio_value': portfolio_value
+                'portfolio_value': portfolio_value,
+                'capital_after': self.current_capital
             }
         )
         
@@ -646,6 +647,7 @@ class EnhancedMomentumBacktester:
             "risk_amount": actual_risk_amount,
             "risk_percentage": risk_percentage,
             "portfolio_value": portfolio_value,
+            "capital_after": self.current_capital,
             "date": current_date.date().isoformat()
         }, "backtest")
         
@@ -659,12 +661,12 @@ class EnhancedMomentumBacktester:
         }, "backtest")
         return event
     
-    def execute_sell(self, current_date: datetime, current_row: pd.Series, reason: str) -> MarketEvent:
-        """Execute sell order"""
+    def execute_sell(self, current_date: datetime, current_row: pd.Series, reason: str, price_override: float | None = None) -> MarketEvent:
+        """Execute sell order (supports optional price override for stop executions)"""
         if self.current_trade is None:
             raise ValueError("No current trade to sell")
         
-        sell_price = current_row['Close']
+        sell_price = price_override if price_override is not None else current_row['Close']
         shares = self.current_trade.shares
         proceeds = shares * sell_price
         
@@ -695,7 +697,8 @@ class EnhancedMomentumBacktester:
                 'proceeds': proceeds,
                 'pnl': trade_to_complete.pnl,
                 'pnl_percent': trade_to_complete.pnl_percent,
-                'reason': reason
+                'reason': reason,
+                'capital_after': self.current_capital
             }
         )
         
@@ -706,6 +709,7 @@ class EnhancedMomentumBacktester:
             "price": sell_price,
             "reason": reason,
             "pnl": trade_to_complete.pnl,
+            "capital_after": self.current_capital,
             "date": current_date.date().isoformat()
         }, "backtest")
         return event
@@ -917,25 +921,42 @@ class EnhancedMomentumBacktester:
                         await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             elif self.state == TradingState.IN_POSITION:
-                # Check for sell signal
-                should_sell, sell_reason = self.check_sell_signal(current_date, current_row)
-                if should_sell:
-                    sell_event = self.execute_sell(current_date, current_row, sell_reason)
+                # Intraday stop-loss enforcement at prior breakout day's low
+                try:
+                    stop_level = float(self.current_trade.stop_loss) if self.current_trade else None
+                except Exception:
+                    stop_level = None
+                if self.current_trade and stop_level is not None and current_row['Low'] <= stop_level:
+                    # Execute at stop level to cap loss at ~1% risk
+                    sell_event = self.execute_sell(current_date, current_row, "Stop loss hit", price_override=stop_level)
                     daily_events.append(sell_event)
-                    log_info(f"🔴 SELL: Position closed for {self.ticker} on {current_date.date()} - Reason: {sell_reason}", {
+                    log_info(f"⛔ STOP: Intraday stop hit at ${stop_level:.2f}", {
                         "ticker": self.ticker,
-                        "event": "sell",
-                        "reason": sell_reason,
+                        "event": "stop_loss_hit",
+                        "stop_level": stop_level,
                         "date": current_date.date().isoformat()
                     }, "backtest")
-                    await asyncio.sleep(0)  # Yield control to event loop for real-time logging
+                    await asyncio.sleep(0)
                 else:
-                    log_info(f"🟢 HOLDING: Position maintained for {self.ticker} on {current_date.date()}", {
-                        "ticker": self.ticker,
-                        "event": "holding",
-                        "date": current_date.date().isoformat()
-                    }, "backtest")
-                    await asyncio.sleep(0)  # Yield control to event loop for real-time logging
+                    # Close-based exit condition remains (below max(breakout low, 20SMA))
+                    should_sell, sell_reason = self.check_sell_signal(current_date, current_row)
+                    if should_sell:
+                        sell_event = self.execute_sell(current_date, current_row, sell_reason)
+                        daily_events.append(sell_event)
+                        log_info(f"🔴 SELL: Position closed for {self.ticker} on {current_date.date()} - Reason: {sell_reason}", {
+                            "ticker": self.ticker,
+                            "event": "sell",
+                            "reason": sell_reason,
+                            "date": current_date.date().isoformat()
+                        }, "backtest")
+                        await asyncio.sleep(0)
+                    else:
+                        log_info(f"🟢 HOLDING: Position maintained for {self.ticker} on {current_date.date()}", {
+                            "ticker": self.ticker,
+                            "event": "holding",
+                            "date": current_date.date().isoformat()
+                        }, "backtest")
+                        await asyncio.sleep(0)
             
             # Calculate daily performance
             performance_metrics = self.calculate_daily_performance(current_date, current_row['Close'])
