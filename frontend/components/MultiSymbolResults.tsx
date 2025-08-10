@@ -430,7 +430,15 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
                   return (
                     <div key={symbol} className="p-3 rounded-lg border bg-green-500/5 border-green-500/20">
                       <div className="flex items-center justify-between mb-1">
-                        <span className="font-medium text-white">{symbol}</span>
+                        <span className="font-medium text-white flex items-center gap-2">{symbol}
+                          <button
+                            title="View chart"
+                            className="p-1 rounded hover:bg-white/10 transition-colors"
+                            onClick={() => openSymbolChart(symbol)}
+                          >
+                            <LineChart className="h-4 w-4 text-purple-400" />
+                          </button>
+                        </span>
                         <span className="text-green-400 text-sm">${(m.total_pnl || 0).toFixed(2)}</span>
                       </div>
                       <div className="text-xs text-muted-foreground">Trades: {m.total_trades || 0} • Win rate: {(m.win_rate || 0).toFixed(1)}%</div>
@@ -451,7 +459,15 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
                   return (
                     <div key={symbol} className="p-3 rounded-lg border bg-red-500/5 border-red-500/20">
                       <div className="flex items-center justify-between mb-1">
-                        <span className="font-medium text-white">{symbol}</span>
+                        <span className="font-medium text-white flex items-center gap-2">{symbol}
+                          <button
+                            title="View chart"
+                            className="p-1 rounded hover:bg-white/10 transition-colors"
+                            onClick={() => openSymbolChart(symbol)}
+                          >
+                            <LineChart className="h-4 w-4 text-purple-400" />
+                          </button>
+                        </span>
                         <span className="text-red-400 text-sm">${(m.total_pnl || 0).toFixed(2)}</span>
                       </div>
                       <div className="text-xs text-muted-foreground">Trades: {m.total_trades || 0} • Win rate: {(m.win_rate || 0).toFixed(1)}%</div>
@@ -469,7 +485,15 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
                 {grouped.no_trades.map((symbol) => (
                   <div key={symbol} className="p-3 rounded-lg border bg-yellow-500/5 border-yellow-500/20">
                     <div className="flex items-center justify-between">
-                      <span className="font-medium text-white">{symbol}</span>
+                      <span className="font-medium text-white flex items-center gap-2">{symbol}
+                        <button
+                          title="View chart"
+                          className="p-1 rounded hover:bg-white/10 transition-colors"
+                          onClick={() => openSymbolChart(symbol)}
+                        >
+                          <LineChart className="h-4 w-4 text-purple-400" />
+                        </button>
+                      </span>
                       <span className="text-yellow-300 text-xs">No trades</span>
                     </div>
                   </div>
@@ -485,7 +509,15 @@ export default function MultiSymbolResults({ results, initialCapital, period, is
                 {grouped.failed.map((symbol) => (
                   <div key={symbol} className="p-3 rounded-lg border bg-gray-600/20 border-white/10">
                     <div className="flex items-center justify-between">
-                      <span className="font-medium text-white">{symbol}</span>
+                      <span className="font-medium text-white flex items-center gap-2">{symbol}
+                        <button
+                          title="View chart"
+                          className="p-1 rounded hover:bg-white/10 transition-colors"
+                          onClick={() => openSymbolChart(symbol)}
+                        >
+                          <LineChart className="h-4 w-4 text-purple-400" />
+                        </button>
+                      </span>
                       <span className="text-gray-400 text-xs">Error</span>
                     </div>
                     <div className="text-xs text-gray-400 truncate">{individual[symbol]?.error || 'Data unavailable'}</div>

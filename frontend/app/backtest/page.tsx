@@ -1049,10 +1049,10 @@ export default function BacktestEngine() {
       </div>
 
       {/* Error Display */}
-      {backtestResult && !backtestResult.success && (
+      {backtestResult && backtestResult.success === false && (
         <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
           <h3 className="text-red-400 font-medium mb-2">Backtest Failed</h3>
-          <p className="text-red-300 text-sm">{backtestResult.error}</p>
+          <p className="text-red-300 text-sm">{backtestResult.error || 'Multi-symbol backtest failed'}</p>
         </div>
       )}
 
@@ -1134,7 +1134,7 @@ export default function BacktestEngine() {
             <div className="card-glow p-4">
               <h4 className="text-lg font-medium text-white mb-3">Live Trade Log</h4>
               <div className="space-y-2 max-h-80 overflow-auto">
-                {Object.entries((liveResults?.individual_results || backtestResult?.individual_results || {})).flatMap(([symbol, payload]: any) => {
+                {Object.entries(((liveResults as any)?.individual_results || (backtestResult as any)?.individual_results || {})).flatMap(([symbol, payload]: any) => {
                   const trades = payload?.trades || []
                   return trades.map((t: any, idx: number) => (
                     <div key={`${symbol}-${idx}`} className="flex items-center justify-between text-sm p-2 rounded-lg bg-gray-800/50 border border-white/10">

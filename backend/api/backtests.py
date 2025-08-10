@@ -567,8 +567,9 @@ async def _process_multi_symbol_backtest(job_id: str, symbols: list, period: str
             "progress": 100,
             "message": f"Multi-symbol backtest completed! {len(successful_symbols)}/{total_symbols} successful",
             "individual_results": make_json_serializable(individual_results),
-            "combined_results": {"results": make_json_serializable(combined)},
-            "results": {"results": make_json_serializable(combined)},
+            "combined_results": {"success": True, "results": make_json_serializable(combined)},
+            "results": {"success": True, "results": make_json_serializable(combined)},
+            "success": True,
             "summary": {
                 "total_symbols": total_symbols,
                 "successful_symbols": len(successful_symbols),
