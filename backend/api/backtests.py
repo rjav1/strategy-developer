@@ -9,7 +9,7 @@ from services.serialization import make_json_serializable
 
 router = APIRouter(prefix="", tags=["backtests"])
 
-# In-memory job store reused from previous implementation
+# In-memory job store - will be shared when router is included in main
 backtest_results: dict = {}
 
 

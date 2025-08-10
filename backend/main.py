@@ -24,6 +24,9 @@ import asyncio
 from pathlib import Path
 from logging_manager import logging_manager, log_info, log_warn, log_error, log_debug
 
+# Import API routers
+from api.backtests import router as backtests_router
+
 # Global cache for all NYSE tickers
 nyse_ticker_cache = None
 nyse_ticker_cache_time = 0
@@ -45,6 +48,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include API routers  
+app.include_router(backtests_router)
+
 # In-memory cache
 cache = {}
 CACHE_DURATION = 300  # 5 minutes for data caching
@@ -53,6 +59,10 @@ CACHE_DURATION = 300  # 5 minutes for data caching
 strategies = {}
 uploaded_data = {}
 backtest_results = {}
+
+# Share the backtest_results dictionary with the API router module
+import api.backtests
+api.backtests.backtest_results = backtest_results
 
 # Load built-in strategies
 def load_builtin_strategies():
@@ -2918,42 +2928,7 @@ async def get_backtest_progress(job_id: str):
         # Return minimal safe payload
         return {"status": "error", "message": f"Serialization error: {str(e)}"}
 
-@app.post("/backtest/multi-symbol")
-async def run_multi_symbol_backtest(request: dict):
-    """
-    Run multi-symbol momentum backtest with combined results
-    """
-    try:
-        symbols = request.get("symbols", [])
-        period = request.get("period", "1y")
-        initial_capital = request.get("initial_capital", 10000.0)
-        
-        if not symbols:
-            raise HTTPException(status_code=400, detail="No symbols provided")
-        
-        import uuid
-        job_id = str(uuid.uuid4())
-        backtest_results[job_id] = {
-            "status": "running",
-            "progress": 0,
-            "message": "Starting multi-symbol backtest...",
-            "created_at": datetime.now(),
-            "symbols": symbols,
-            "current_symbol": "",
-            "individual_results": {},
-            "combined_results": None
-        }
-        
-        print(f"🚀 Starting multi-symbol backtest for {len(symbols)} symbols: {symbols}")
-        
-        # Start background task
-        asyncio.create_task(process_multi_symbol_backtest(job_id, symbols, period, initial_capital))
-        
-        return {"job_id": job_id, "message": f"Multi-symbol backtest started for {len(symbols)} symbols"}
-        
-    except Exception as e:
-        print(f"❌ Multi-symbol backtest failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Multi-symbol backtest failed: {str(e)}")
+# Multi-symbol endpoint moved to api/backtests.py
 
 async def process_multi_symbol_backtest(job_id: str, symbols: list, period: str, initial_capital: float):
     """Background task to process multi-symbol backtest"""
