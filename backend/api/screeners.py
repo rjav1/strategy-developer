@@ -88,21 +88,44 @@ async def screen_momentum_stream(request: dict):
                     percent = int((processed_count / total_symbols) * 100)
                     yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Skipping invalid symbol: {clean_symbol}'})}\n\n"
                     continue
+                
+                # Send progress before processing
                 percent = int((processed_count / total_symbols) * 100)
                 yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Analyzing {clean_symbol}...'})}\n\n"
-                ticker = yf.Ticker(clean_symbol)
-                hist = ticker.history(period="3mo")
+                
+                # Add timeout protection for Yahoo Finance API calls
+                try:
+                    ticker = yf.Ticker(clean_symbol)
+                    hist = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: ticker.history(period="3mo", timeout=10)
+                        ), 
+                        timeout=15  # 15-second total timeout per symbol
+                    )
+                except asyncio.TimeoutError:
+                    processed_count += 1
+                    percent = int((processed_count / total_symbols) * 100)
+                    yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Timeout fetching data for {clean_symbol}'})}\n\n"
+                    continue
                 await asyncio.sleep(0)
                 if hist.empty or len(hist) < 50:
                     processed_count += 1
                     percent = int((processed_count / total_symbols) * 100)
                     yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'Insufficient data for {clean_symbol}'})}\n\n"
                     continue
+                
                 pattern_found, criteria_details, confidence_score = check_momentum_pattern(hist, clean_symbol)
+                
+                # Get company name with timeout protection
                 try:
-                    info = ticker.info
+                    info = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: ticker.info
+                        ), 
+                        timeout=5  # 5-second timeout for company info
+                    )
                     company_name = info.get('longName', info.get('shortName', clean_symbol)) if info else clean_symbol
-                except Exception:
+                except (asyncio.TimeoutError, Exception):
                     company_name = clean_symbol
                 if confidence_score >= 80:
                     strength = "Strong"
@@ -120,11 +143,16 @@ async def screen_momentum_stream(request: dict):
                 }
                 total_met = sum(criteria_met.values())
                 result = ScreenResult(symbol=clean_symbol, criteria_met=criteria_met, total_met=total_met, pattern_strength=strength, confidence_score=confidence_score, name=company_name)
+                
+                # Increment counter before sending completion message
+                processed_count += 1
+                percent = int((processed_count / total_symbols) * 100)
+                
                 if total_met >= 3 or request.get('include_bad_setups'):
                     yield f"data: {json.dumps({'type': 'result', 'result': result.dict(), 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': 'Result'})}\n\n"
                 else:
                     yield f"data: {json.dumps({'type': 'progress', 'current': processed_count, 'total': total_symbols, 'percent': percent, 'current_symbol': clean_symbol, 'message': f'No pattern found in {clean_symbol}'})}\n\n"
-                processed_count += 1
+                    
             except Exception as e:
                 processed_count += 1
                 percent = int((processed_count / total_symbols) * 100)

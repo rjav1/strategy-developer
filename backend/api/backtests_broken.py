@@ -9,7 +9,7 @@ from services.serialization import make_json_serializable
 
 router = APIRouter(prefix="", tags=["backtests"])
 
-# In-memory job store reused from previous implementation
+# In-memory job store - will be shared when router is included in main
 backtest_results: dict = {}
 
 
@@ -363,7 +363,7 @@ async def _process_multi_symbol_backtest(job_id: str, symbols: list, period: str
                 # Generate results with error handling
                 try:
                     print(f"📊 Generating results for {symbol}...")
-                    results = backtester.generate_results()
+                results = backtester.generate_results()
                     print(f"✅ Results generated for {symbol}")
                     
                     individual_results[symbol] = make_json_serializable({
@@ -417,14 +417,42 @@ async def _process_multi_symbol_backtest(job_id: str, symbols: list, period: str
         if failed_symbols:
             print(f"Failed symbols: {failed_symbols[:10]}{'...' if len(failed_symbols) > 10 else ''}")
         
-        # Final update
+        # Calculate combined metrics for all successfully processed symbols
+        all_trades = []
+        for symbol, result in individual_results.items():
+            if result.get("success") and result.get("trades"):
+                symbol_trades = result["trades"]
+                if isinstance(symbol_trades, list):
+                    # Add symbol identifier to each trade
+                    for trade in symbol_trades:
+                        if isinstance(trade, dict):
+                            trade["symbol"] = symbol
+                    all_trades.extend(symbol_trades)
+        
+        # Calculate the combined metrics using the same logic as the old implementation
+        total_initial_capital = total_symbols * initial_capital
+        combined_metrics = calculate_combined_metrics(
+            individual_results, 
+            all_trades, 
+            total_initial_capital,
+            list(successful_symbols),
+            strip_trades=True
+        )
+        
+        print(f"🧮 Calculated combined metrics: {len(all_trades)} total trades, "
+              f"${combined_metrics.get('results', {}).get('total_pnl', 0):.2f} total PnL")
+        
+        # Final update with proper combined results
         backtest_results[job_id].update({
             "status": "completed",
             "progress": 100,
             "message": f"Multi-symbol backtest completed! {len(successful_symbols)}/{total_symbols} successful",
             "individual_results": individual_results,
-            "combined_results": {"results": {}},
-            "results": {"results": {}},
+            "combined_results": combined_metrics,
+            "results": combined_metrics.get("results", {}),  # Extract just the results portion for frontend compatibility
+            "symbols_tested": list(individual_results.keys()),
+            "symbols_passed": list(successful_symbols),
+            "symbols_failed": list(failed_symbols),
             "summary": {
                 "total_symbols": total_symbols,
                 "successful_symbols": len(successful_symbols),
@@ -441,4 +469,120 @@ async def _process_multi_symbol_backtest(job_id: str, symbols: list, period: str
             "status": "error", 
             "message": f"Multi-symbol backtest failed: {str(e)}",
             "error_details": str(e)
-        }) 
+        })
+
+
+def calculate_combined_metrics(individual_results: dict, all_trades: list, total_initial_capital: float, symbols_tested: list, strip_trades: bool = False):
+    """Calculate combined performance metrics across all symbols.
+    If strip_trades=True, omit the heavy trades array from the result to keep payload small.
+    """
+    
+    successful_results = {k: v for k, v in individual_results.items() if v.get("success", False)}
+    
+    if not successful_results:
+        return {
+            "success": False,
+            "error": "No symbols were successfully tested",
+            "results": {},
+            "trades": [],
+            "individual_breakdown": individual_results,
+            "symbols_tested": [],
+            "symbols_passed": [],
+            "symbols_failed": list(individual_results.keys())
+        }
+    
+    # Categorize symbols by profitability but only include those with trades > 0
+    profitable_symbols = []
+    unprofitable_symbols = []
+    for symbol, result in successful_results.items():
+        trades_count_sym = result.get("trades")
+        if trades_count_sym is None:
+            trades_count_sym = result.get("results", {}).get("total_trades", 0)
+        if isinstance(trades_count_sym, list):
+            trades_count_sym = len(trades_count_sym)
+        if (trades_count_sym or 0) <= 0:
+            continue  # skip no-trade symbols
+        symbol_pnl = result.get("results", {}).get("total_pnl", 0)
+        if symbol_pnl > 0:
+            profitable_symbols.append(symbol)
+        else:
+            unprofitable_symbols.append(symbol)
+    
+    # Calculate combined metrics
+    total_trades = len(all_trades)
+    winning_trades = len([t for t in all_trades if t.get("pnl", 0) > 0])
+    losing_trades = len([t for t in all_trades if t.get("pnl", 0) <= 0])
+    
+    total_pnl = sum(t.get("pnl", 0) for t in all_trades)
+    total_return_pct = (total_pnl / total_initial_capital) * 100 if total_initial_capital > 0 else 0
+    
+    avg_trade_pnl = total_pnl / total_trades if total_trades > 0 else 0
+    avg_win = sum(t.get("pnl", 0) for t in all_trades if t.get("pnl", 0) > 0) / winning_trades if winning_trades > 0 else 0
+    avg_loss = abs(sum(t.get("pnl", 0) for t in all_trades if t.get("pnl", 0) <= 0) / losing_trades) if losing_trades > 0 else 0
+    
+    win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
+    
+    # Calculate profit factor
+    total_wins = sum(t.get("pnl", 0) for t in all_trades if t.get("pnl", 0) > 0)
+    total_losses = abs(sum(t.get("pnl", 0) for t in all_trades if t.get("pnl", 0) <= 0))
+    
+    if total_losses > 0:
+        profit_factor = total_wins / total_losses
+        profit_factor_is_infinite = False
+    else:
+        profit_factor = float('inf') if total_wins > 0 else 0
+        profit_factor_is_infinite = total_wins > 0
+    
+    # Best and worst performing symbols
+    symbol_performance = {}
+    for symbol, result in successful_results.items():
+        if result.get("results", {}).get("total_pnl") is not None:
+            symbol_performance[symbol] = result["results"]["total_pnl"]
+    
+    best_symbol = max(symbol_performance.items(), key=lambda x: x[1]) if symbol_performance else ("N/A", 0)
+    worst_symbol = min(symbol_performance.items(), key=lambda x: x[1]) if symbol_performance else ("N/A", 0)
+    
+    # Build the consolidated result
+    combined_results = {
+        "success": True,
+        "results": {
+            "total_trades": total_trades,
+            "winning_trades": winning_trades,
+            "losing_trades": losing_trades,
+            "win_rate": round(win_rate, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_return_pct": round(total_return_pct, 2),
+            "avg_trade_pnl": round(avg_trade_pnl, 2),
+            "avg_win": round(avg_win, 2),
+            "avg_loss": round(avg_loss, 2),
+            "profit_factor": round(profit_factor, 2) if profit_factor not in [float('inf'), float('-inf')] else None,
+            "profit_factor_is_infinite": profit_factor_is_infinite,
+            "total_wins": round(total_wins, 2),
+            "total_losses": round(total_losses, 2),
+            "initial_capital": total_initial_capital,
+            "final_capital": total_initial_capital + total_pnl,
+            # Count all attempted symbols rather than only passed ones to avoid under-reporting
+            "symbols_tested": len(individual_results),
+            "symbols_passed": len(successful_results),
+            "symbols_failed": len(individual_results) - len(successful_results),
+            "profitable_symbols": len(profitable_symbols),
+            "unprofitable_symbols": len(unprofitable_symbols),
+            "best_symbol": best_symbol[0],
+            "best_symbol_pnl": round(best_symbol[1], 2),
+            "worst_symbol": worst_symbol[0],
+            "worst_symbol_pnl": round(worst_symbol[1], 2),
+            "total_initial_capital": total_initial_capital,
+            "avg_return_per_symbol": round(total_return_pct / len(successful_results), 2) if successful_results else 0
+        },
+        "trades": [] if strip_trades else all_trades,
+        "individual_breakdown": individual_results,
+        # Also return explicit lists for UI purposes
+        "symbols_tested": list(individual_results.keys()),
+        "symbols_tested_count": len(individual_results),
+        "symbols_passed": list(successful_results.keys()),
+        "symbols_failed": [k for k, v in individual_results.items() if not v.get("success", False)],
+        "symbols_profitable": profitable_symbols,
+        "symbols_unprofitable": unprofitable_symbols
+    }
+    
+    return combined_results 
