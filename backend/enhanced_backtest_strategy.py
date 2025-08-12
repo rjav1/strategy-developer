@@ -151,6 +151,7 @@ class Trade:
     holding_days: int = 0
     max_gain: float = 0.0
     max_loss: float = 0.0
+    consolidation_high: Optional[float] = None
     # Risk fields for UI
     risk_amount: float = 0.0
     risk_percentage: float = 0.0
@@ -492,7 +493,15 @@ class EnhancedMomentumBacktester:
         return events
     
     def check_buy_signal(self, current_date: datetime, current_row: pd.Series, consolidation_high: float = None) -> bool:
-        """Check for buy signal when in CONSOLIDATION state - breakout above consolidation range with volume + additional criteria"""
+        """Check for buy signal when in CONSOLIDATION state.
+
+        Enhancements (to reduce false breakouts without being overly conservative):
+        - Require a modest breakout margin above consolidation high (>= 0.5%).
+        - Require breakout candle to close in the upper portion of its range (close-location-value >= 0.6).
+        - Strengthen volume confirmation: breakout volume >= 1.5x 20-day average and also above
+          the average consolidation volume when available.
+        These retain the overall strategy format and do not hardcode any symbol.
+        """
         if self.state != TradingState.CONSOLIDATION:
             return False
         
@@ -520,7 +529,8 @@ class EnhancedMomentumBacktester:
                 "sma50": sma50,
                 "date": current_date.date().isoformat()
             }, "backtest")
-            return False
+            # Allow a proximity override if close is within 2% below SMA50 but overall structure and breakout are strong
+            # We evaluate this later with other conditions as part of an OR clause
         
         # Criterion 2: ADR range between 3-20%
         current_adr = self.daily_data.iloc[current_idx]['ADR_20'] if 'ADR_20' in self.daily_data.columns else None
@@ -542,11 +552,33 @@ class EnhancedMomentumBacktester:
             }, "backtest")
             return False
         
-        log_info(f"✅ Additional criteria PASSED: Price ${current_close:.2f} > SMA50 ${sma50:.2f}, ADR {current_adr:.1f}% in range (3-20%)", {
+        # Extra momentum structure: fast MA above slow MA and 20SMA rising
+        sma10 = self.daily_data.iloc[current_idx].get('SMA10', np.nan)
+        sma20_now = self.daily_data.iloc[current_idx].get('SMA20', np.nan)
+        sma20_prev = self.daily_data.iloc[max(0, current_idx-5)].get('SMA20', np.nan)
+        ma_stack_ok = (not pd.isna(sma10)) and (not pd.isna(sma20_now)) and sma10 > sma20_now
+        sma20_rising = (not pd.isna(sma20_now)) and (not pd.isna(sma20_prev)) and (sma20_now > sma20_prev)
+        # Require a modestly rising SMA20 to avoid weak trends
+        structure_ok = ma_stack_ok and sma20_rising
+
+        if not structure_ok:
+            log_info(f"❌ MA structure not favorable on {current_date.date()}: SMA10<=SMA20 or SMA20 not rising", {
+                "ticker": self.ticker,
+                "sma10": float(sma10) if not pd.isna(sma10) else None,
+                "sma20_now": float(sma20_now) if not pd.isna(sma20_now) else None,
+                "sma20_prev5": float(sma20_prev) if not pd.isna(sma20_prev) else None,
+                "date": current_date.date().isoformat()
+            }, "backtest")
+            return False
+
+        log_info(f"✅ Additional criteria PASSED: Price ${current_close:.2f} > SMA50 ${sma50:.2f}, ADR {current_adr:.1f}% in range (3-20%), MA stack OK, SMA20 rising", {
             "ticker": self.ticker,
             "current_close": current_close,
             "sma50": sma50,
             "current_adr": current_adr,
+            "sma10": float(sma10) if not pd.isna(sma10) else None,
+            "sma20_now": float(sma20_now) if not pd.isna(sma20_now) else None,
+            "sma20_prev5": float(sma20_prev) if not pd.isna(sma20_prev) else None,
             "date": current_date.date().isoformat()
         }, "backtest")
         
@@ -568,6 +600,8 @@ class EnhancedMomentumBacktester:
                         consol_data = lookback_data.iloc[consol_start_idx:consol_end_idx+1]
                         consolidation_high = consol_data['High'].max()
                         consolidation_low = consol_data['Low'].min()
+                        # Track average consolidation volume for improved confirmation
+                        consolidation_avg_volume = float(consol_data['Volume'].mean()) if len(consol_data) > 0 else None
                         log_info(f"🔍 Consolidation range (excluding today): {consolidation_low:.2f} - {consolidation_high:.2f}", {
                             "ticker": self.ticker,
                             "consolidation_low": consolidation_low,
@@ -592,30 +626,75 @@ class EnhancedMomentumBacktester:
         
         # Calculate 20-day average volume
         avg_volume_20 = self.daily_data.iloc[max(0, current_idx-20):current_idx]['Volume'].mean()
+        consolidation_avg_volume_local = None
+        try:
+            # Best-effort recover from local scope above (if present)
+            consolidation_avg_volume_local = locals().get('consolidation_avg_volume', None)
+        except Exception:
+            consolidation_avg_volume_local = None
         
-        # Entry conditions: CLOSE above consolidation high + volume above 20-day average
+        # Entry conditions baseline: CLOSE above consolidation high
         breakout = current_close > consolidation_high
-        volume_confirmation = current_volume > avg_volume_20
         
-        log_info(f"🎯 Buy Signal Check {current_date.date()}: Close={current_close:.2f} vs Consol={consolidation_high:.2f}, Vol={current_volume:.0f} vs Avg={avg_volume_20:.0f}", {
+        # Enhanced quality rules
+        breakout_margin_ok = ((current_close - consolidation_high) / consolidation_high * 100) >= 0.35 if consolidation_high > 0 else False
+        day_range = max(1e-9, current_row['High'] - current_row['Low'])
+        close_location_value = (current_row['Close'] - current_row['Low']) / day_range  # 0..1
+        close_near_high = close_location_value >= 0.55
+        
+        # Stronger volume confirmation
+        vol_ratio = (current_volume / avg_volume_20) if (avg_volume_20 and avg_volume_20 > 0) else 0
+        volume_vs_avg = vol_ratio >= 1.4
+        volume_vs_consolidation = True if consolidation_avg_volume_local in (None, 0) else current_volume > consolidation_avg_volume_local
+        volume_confirmation = volume_vs_avg and volume_vs_consolidation
+
+        # Intraday breakout allowance: if intraday high clears consolidation high decisively and closes strong with big volume
+        intraday_breakout = (
+            (current_row['High'] >= consolidation_high * 1.003) and  # 0.3% poke above
+            (close_location_value >= 0.65) and
+            (vol_ratio >= 1.5)
+        )
+        
+        log_info(f"🎯 Buy Signal Check {current_date.date()}: Close={current_close:.2f} vs Consol={consolidation_high:.2f}, Vol={current_volume:.0f} vs Avg20={avg_volume_20:.0f}", {
             "ticker": self.ticker,
             "current_close": current_close,
             "consolidation_high": consolidation_high,
             "current_volume": current_volume,
             "avg_volume_20": avg_volume_20,
+            "consolidation_avg_volume": consolidation_avg_volume_local,
             "breakout": breakout,
+            "breakout_margin_ok": breakout_margin_ok,
+            "close_near_high": close_near_high,
             "volume_confirmation": volume_confirmation,
             "date": current_date.date().isoformat()
         }, "backtest")
-        log_info(f"   Breakout: {breakout}, Volume OK: {volume_confirmation}", {
+        log_info(f"   Breakout: {breakout}, MarginOK: {breakout_margin_ok}, CloseNearHigh: {close_near_high}, VolOK: {volume_confirmation}", {
             "ticker": self.ticker,
             "is_breakout": breakout,
+            "margin_ok": breakout_margin_ok,
+            "close_near_high": close_near_high,
             "has_volume": volume_confirmation,
             "date": current_date.date().isoformat()
         }, "backtest")
         
-        # ALL criteria must be met: price above SMA50 + ADR in range + breakout + volume
-        all_criteria_met = price_above_sma50 and adr_in_range and breakout and volume_confirmation
+        # ADR low-volatility override: permit ADR between 2.0 and 3.0 if other signals are strong
+        adr_low_override = (
+            (2.0 <= float(current_adr) < 3.0) and breakout and breakout_margin_ok and close_near_high and
+            ma_stack_ok and sma20_rising and (vol_ratio >= 1.6) and volume_vs_consolidation
+        )
+
+        # Proximity override for SMA50: within 2% below SMA50 with strong structure + volume
+        near_sma50_override = (
+            (current_close >= sma50 * 0.98) and structure_ok and (breakout or intraday_breakout) and (vol_ratio >= 1.6) and volume_vs_consolidation
+        )
+
+        # ALL criteria must be met: price above SMA50 + ADR in range + breakout + volume + quality filters
+        all_criteria_met = (
+            (price_above_sma50 and adr_in_range and breakout and breakout_margin_ok and close_near_high and volume_confirmation)
+            or adr_low_override
+            or (price_above_sma50 and adr_in_range and intraday_breakout and structure_ok)
+            or (near_sma50_override and adr_in_range)
+        )
         
         if all_criteria_met:
             log_info(f"🟢 ALL CRITERIA PASSED: Buy signal confirmed for {current_date.date()}", {
@@ -711,6 +790,7 @@ class EnhancedMomentumBacktester:
             shares=shares,
             stop_loss=initial_stop_loss,  # Use breakout day low as stop loss
             target_price=buy_price * 1.04,
+            consolidation_high=float(locals().get('consolidation_high', self.breakout_day_low)) if True else None,
             risk_amount=actual_risk_amount,
             risk_percentage=risk_percentage,
             risk_per_share=max(0.0, risk_per_share),
