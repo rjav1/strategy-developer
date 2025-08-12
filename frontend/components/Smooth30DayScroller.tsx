@@ -687,11 +687,11 @@ export default function Smooth30DayScroller({
             text: ['BUY'],
             textposition: 'bottom center',
             textfont: { color: 'white', size: 10, family: 'Arial Black' },
-            name: `BUY ${trade.shares || 0} shares`,
+            name: `BUY ${Number(trade.shares || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`,
             xaxis: 'x',
             yaxis: 'y',
             showlegend: false,
-            hovertemplate: `<b>BUY</b><br>Price: $%{y:.2f}<br>Shares: ${trade.shares || 0}<br>Date: %{x}<extra></extra>`
+            hovertemplate: `<b>BUY</b><br>Price: $%{y:.2f}<br>Shares: ${Number(trade.shares || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })}<br>Date: %{x}<extra></extra>`
           })
         }
         
@@ -711,11 +711,11 @@ export default function Smooth30DayScroller({
             text: ['SELL'],
             textposition: 'top center',
             textfont: { color: 'white', size: 10, family: 'Arial Black' },
-            name: `SELL ${trade.shares || 0} shares`,
+            name: `SELL ${Number(trade.shares || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`,
             xaxis: 'x',
             yaxis: 'y',
             showlegend: false,
-            hovertemplate: `<b>SELL</b><br>Price: $%{y:.2f}<br>Shares: ${trade.shares || 0}<br>P&L: ${trade.pnl ? '$' + trade.pnl.toFixed(2) : 'N/A'}<br>Date: %{x}<extra></extra>`
+            hovertemplate: `<b>SELL</b><br>Price: $%{y:.2f}<br>Shares: ${Number(trade.shares || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })}<br>P&L: ${trade.pnl ? '$' + trade.pnl.toFixed(2) : 'N/A'}<br>Date: %{x}<extra></extra>`
           })
         }
         return

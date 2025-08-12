@@ -166,7 +166,7 @@ class Trade:
     exit_date: Optional[datetime] = None
     exit_price: Optional[float] = None
     exit_reason: str = ""
-    shares: int = 0
+    shares: float = 0.0
     stop_loss: Optional[float] = None
     target_price: Optional[float] = None
     pnl: float = 0.0
@@ -191,7 +191,7 @@ class Trade:
             'exit_date': self.exit_date.isoformat() if self.exit_date else None,
             'exit_price': self.exit_price,
             'exit_reason': self.exit_reason,
-            'shares': self.shares,
+            'shares': round(self.shares, 4),
             'stop_loss': self.stop_loss,
             'target_price': self.target_price,
             'pnl': round(self.pnl, 2),
@@ -769,48 +769,48 @@ class EnhancedMomentumBacktester:
         return False, ""
     
     def execute_buy(self, current_date: datetime, current_row: pd.Series) -> MarketEvent:
-        """Execute buy order at close of breakout day with 1% risk-based position sizing"""
+        """Execute buy order at close of breakout day.
+
+        Rules:
+        - Max equity per trade is the available cash (no leverage)
+        - Allow fractional shares
+        - Preserve 1% portfolio risk sizing, but never allocate more than available cash
+        """
         buy_price = current_row['Close']  # Execute at close of breakout day
         
         # Store breakout day low for exit calculation (this is our initial stop loss)
         self.breakout_day_low = current_row['Low']
         initial_stop_loss = self.breakout_day_low
         
-        # Calculate 1% risk-based position sizing
-        # Formula: (entry_price - stop_loss) × shares_to_buy = portfolio_size × 0.01
-        # Rearranged: shares_to_buy = (portfolio_size × 0.01) / (entry_price - stop_loss)
-        portfolio_value = self.current_capital
-        max_risk_amount = portfolio_value * 0.01  # 1% of portfolio
+        # Calculate 1% risk-based position sizing (base)
+        # Formula: (entry - stop) * shares = equity * 0.01
+        equity = float(self.current_capital)
+        max_risk_amount = equity * 0.01
         risk_per_share = buy_price - initial_stop_loss
-        
-        if risk_per_share <= 0:
-            # If stop loss is above or equal to entry price, use minimum position
-            log_warn(f"⚠️ Invalid risk calculation: entry=${buy_price:.2f}, stop=${initial_stop_loss:.2f}", {
-                "ticker": self.ticker,
-                "entry_price": buy_price,
-                "stop_loss": initial_stop_loss,
-                "date": current_date.date().isoformat()
-            }, "backtest")
-            shares = int(max_risk_amount / buy_price)  # Fallback to small position
+
+        # Initial shares by risk model (can be fractional)
+        if risk_per_share > 0:
+            risk_model_shares = max_risk_amount / risk_per_share
         else:
-            shares = int(max_risk_amount / risk_per_share)
-        
-        # Ensure we don't exceed available capital
-        max_affordable_shares = int(self.current_capital * 0.95 / buy_price)
-        shares = min(shares, max_affordable_shares)
-        
-        # Ensure minimum position of at least 1 share
-        shares = max(1, shares)
-        
+            risk_model_shares = max_risk_amount / max(buy_price * 0.01, 1e-6)
+
+        # Cap by available cash (no leverage). Allow fractional shares.
+        cash_capped_shares = equity / buy_price if buy_price > 0 else 0.0
+        shares = min(risk_model_shares, cash_capped_shares)
+
+        # Ensure a tiny minimum if extremely small
+        if shares < 1e-6:
+            shares = 0.0
+
         # Risk fields
-        actual_risk_amount = max_risk_amount if risk_per_share > 0 else shares * (buy_price * 0.01)
-        risk_percentage = (actual_risk_amount / portfolio_value) * 100 if portfolio_value > 0 else 0.0
+        actual_risk_amount = (buy_price - initial_stop_loss) * shares if risk_per_share > 0 else shares * (buy_price * 0.01)
+        risk_percentage = (actual_risk_amount / equity) * 100 if equity > 0 else 0.0
         
         self.current_trade = Trade(
             entry_date=current_date,
             entry_price=buy_price,
             entry_reason="Momentum Breakout",
-            shares=shares,
+            shares=float(shares),
             stop_loss=initial_stop_loss,  # Use breakout day low as stop loss
             target_price=buy_price * 1.04,
             consolidation_high=float(locals().get('consolidation_high', self.breakout_day_low)) if True else None,
@@ -837,14 +837,14 @@ class EnhancedMomentumBacktester:
             price=buy_price,
             volume=int(current_row['Volume']),
             details={
-                'shares': shares,
-                'cost_basis': shares * buy_price,
+                'shares': float(shares),
+                'cost_basis': float(shares) * buy_price,
                 'stop_loss': self.current_trade.stop_loss,
                 'target_price': self.current_trade.target_price,
                 'risk_amount': actual_risk_amount,
                 'risk_percentage': risk_percentage,
                 'risk_per_share': risk_per_share,
-                'portfolio_value': portfolio_value,
+                'portfolio_value': equity,
                 'capital_after': self.current_capital
             }
         )
@@ -872,7 +872,7 @@ class EnhancedMomentumBacktester:
             "risk_per_share": risk_per_share,
             "risk_amount": actual_risk_amount,
             "risk_percentage": risk_percentage,
-            "portfolio_value": portfolio_value,
+            "portfolio_value": equity,
             "capital_after": self.current_capital,
             "date": current_date.date().isoformat()
         }, "backtest")
@@ -893,7 +893,7 @@ class EnhancedMomentumBacktester:
             raise ValueError("No current trade to sell")
         
         sell_price = price_override if price_override is not None else current_row['Close']
-        shares = self.current_trade.shares
+        shares = float(self.current_trade.shares)
         proceeds = shares * sell_price
         
         # Update trade details
@@ -902,7 +902,8 @@ class EnhancedMomentumBacktester:
         self.current_trade.exit_reason = reason
         self.current_trade.holding_days = (current_date - self.current_trade.entry_date).days
         self.current_trade.pnl = proceeds - (shares * self.current_trade.entry_price)
-        self.current_trade.pnl_percent = (self.current_trade.pnl / (shares * self.current_trade.entry_price)) * 100
+        denom = (shares * self.current_trade.entry_price)
+        self.current_trade.pnl_percent = (self.current_trade.pnl / denom * 100) if denom > 0 else 0.0
         
         # Update capital
         self.current_capital += proceeds
@@ -940,12 +941,12 @@ class EnhancedMomentumBacktester:
         }, "backtest")
         return event
 
-    def execute_partial_sell(self, current_date: datetime, current_row: pd.Series, shares_to_sell: int, reason: str) -> MarketEvent:
+    def execute_partial_sell(self, current_date: datetime, current_row: pd.Series, shares_to_sell: float, reason: str) -> MarketEvent:
         """Trim part of the current position without closing the trade."""
         if self.current_trade is None or shares_to_sell <= 0:
             raise ValueError("No current trade to trim or invalid share size")
         
-        shares_to_sell = min(shares_to_sell, self.current_trade.shares)
+        shares_to_sell = float(min(shares_to_sell, self.current_trade.shares))
         sell_price = current_row['High'] if current_row['High'] > current_row['Close'] else current_row['Close']
         proceeds = shares_to_sell * sell_price
         
@@ -957,7 +958,7 @@ class EnhancedMomentumBacktester:
             exit_date=current_date,
             exit_price=sell_price,
             exit_reason=reason,
-            shares=shares_to_sell,
+            shares=float(shares_to_sell),
             stop_loss=self.current_trade.stop_loss,
             target_price=self.current_trade.target_price,
             risk_amount=self.current_trade.risk_amount,
@@ -972,7 +973,7 @@ class EnhancedMomentumBacktester:
         self.completed_trades.append(trim_trade)
         
         # Update remaining open position
-        self.current_trade.shares -= shares_to_sell
+        self.current_trade.shares = float(max(0.0, self.current_trade.shares - shares_to_sell))
         self.current_capital += proceeds
         
         event = MarketEvent(
@@ -981,8 +982,8 @@ class EnhancedMomentumBacktester:
             price=sell_price,
             volume=int(current_row['Volume']),
             details={
-                'shares_sold': shares_to_sell,
-                'shares_remaining': self.current_trade.shares,
+                'shares_sold': float(shares_to_sell),
+                'shares_remaining': float(self.current_trade.shares),
                 'proceeds': proceeds,
                 'reason': reason,
                 'capital_after': self.current_capital
@@ -1212,8 +1213,9 @@ class EnhancedMomentumBacktester:
                 try:
                     if self.enable_progressive_trims and self.current_trade is not None and self.initial_risk_per_share > 0:
                         threshold_price = self.current_trade.entry_price + self.initial_risk_per_share * self.next_trim_multiple
-                        if current_row['High'] >= threshold_price and self.current_trade.shares > 1:
-                            shares_to_sell = max(1, self.current_trade.shares // 2)
+                        if current_row['High'] >= threshold_price and self.current_trade.shares > 0:
+                            # Sell half the position (fractional allowed)
+                            shares_to_sell = max(0.0, float(self.current_trade.shares) / 2.0)
                             reason = f"Trim at {self.next_trim_multiple:.0f}R"
                             trim_event = self.execute_partial_sell(current_date, current_row, shares_to_sell, reason)
                             daily_events.append(trim_event)

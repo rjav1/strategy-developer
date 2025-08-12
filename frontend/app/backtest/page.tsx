@@ -933,18 +933,18 @@ export default function BacktestEngine() {
                   <div className="flex items-center gap-3">
                     <input
                       type="text"
-                      placeholder="MM/DD/YY"
+                      placeholder="MM/DD/YY or MM/DD/YYYY"
                       value={startDate}
                       onChange={(e) => setStartDate(e.target.value)}
-                      className="w-32 px-3 py-2 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white text-center"
+                      className="w-36 px-3 py-2 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white text-center"
                     />
                     <span className="text-sm text-muted-foreground">to</span>
                     <input
                       type="text"
-                      placeholder="MM/DD/YY"
+                      placeholder="MM/DD/YY or MM/DD/YYYY"
                       value={endDate}
                       onChange={(e) => setEndDate(e.target.value)}
-                      className="w-32 px-3 py-2 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white text-center"
+                      className="w-36 px-3 py-2 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white text-center"
                     />
                   </div>
                 )}

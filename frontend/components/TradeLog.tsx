@@ -370,9 +370,9 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
                     )}
                   </td>
                   <td className="p-4">
-                    {trade.shares ? (
+        {trade.shares ? (
                       <span className="text-white text-sm font-mono">
-                        {trade.shares.toLocaleString()}
+            {Number(trade.shares).toLocaleString(undefined, { maximumFractionDigits: 4 })}
                       </span>
                     ) : (
                       <span className="text-muted-foreground text-sm">-</span>

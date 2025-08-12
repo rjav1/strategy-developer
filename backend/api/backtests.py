@@ -105,17 +105,34 @@ async def run_momentum_backtest(request: BacktestRequest):
         if request.start_date and request.end_date:
             # Normalize to YYYY-MM-DD for yfinance date range support
             try:
-                start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
-                end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                # Try MM/DD/YY format first
+                try:
+                    start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                    end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                except ValueError:
+                    # Try MM/DD/YYYY format if MM/DD/YY fails
+                    start_dt = datetime.strptime(request.start_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+                    end_dt = datetime.strptime(request.end_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+                
                 period_arg = f"{start_dt}:{end_dt}"
             except Exception:
                 # Fallback to provided period if formatting invalid
                 period_arg = request.period
 
         backtester = EnhancedMomentumBacktester(ticker=request.ticker.upper(), period=period_arg, initial_capital=request.initial_capital)
-        if not await backtester.fetch_data():
+        # Protect against hangs with timeouts
+        import asyncio as _asyncio
+        try:
+            fetch_ok = await _asyncio.wait_for(backtester.fetch_data(), timeout=30)
+        except _asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail=f"Timeout fetching data for ticker '{request.ticker}'")
+        if not fetch_ok:
             raise HTTPException(status_code=404, detail=f"Could not fetch data for ticker '{request.ticker}'")
-        if not await backtester.run_simulation():
+        try:
+            sim_ok = await _asyncio.wait_for(backtester.run_simulation(), timeout=90)
+        except _asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail=f"Timeout during simulation for ticker '{request.ticker}'")
+        if not sim_ok:
             raise HTTPException(status_code=500, detail=f"Simulation failed for ticker '{request.ticker}'")
         results = make_json_serializable(backtester.generate_results())
         metrics = results.get("results", {})
@@ -181,20 +198,38 @@ async def stream_momentum_backtest(request: BacktestRequest):
             period_arg = request.period
             if request.start_date and request.end_date:
                 try:
-                    start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
-                    end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                    # Try MM/DD/YY format first
+                    try:
+                        start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                        end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                    except ValueError:
+                        # Try MM/DD/YYYY format if MM/DD/YY fails
+                        start_dt = datetime.strptime(request.start_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+                        end_dt = datetime.strptime(request.end_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+                    
                     period_arg = f"{start_dt}:{end_dt}"
                 except Exception:
                     period_arg = request.period
 
             backtester = EnhancedMomentumBacktester(ticker=request.ticker.upper(), period=period_arg, initial_capital=request.initial_capital)
             yield f"data: {json.dumps({'type': 'status', 'message': 'Fetching market data...', 'progress': 10})}\n\n"
-            if not await backtester.fetch_data():
+            import asyncio as _asyncio
+            try:
+                fetch_ok = await _asyncio.wait_for(backtester.fetch_data(), timeout=30)
+            except _asyncio.TimeoutError:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Timeout fetching data for ticker {request.ticker}'})}\n\n"
+                return
+            if not fetch_ok:
                 yield f"data: {json.dumps({'type': 'error', 'message': f'Could not fetch data for ticker {request.ticker}'})}\n\n"
                 return
             yield f"data: {json.dumps({'type': 'status', 'message': 'Data fetched successfully', 'progress': 30})}\n\n"
             yield f"data: {json.dumps({'type': 'status', 'message': 'Running simulation...', 'progress': 40})}\n\n"
-            if not await backtester.run_simulation():
+            try:
+                sim_ok = await _asyncio.wait_for(backtester.run_simulation(), timeout=90)
+            except _asyncio.TimeoutError:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Timeout during simulation for ticker {request.ticker}'})}\n\n"
+                return
+            if not sim_ok:
                 yield f"data: {json.dumps({'type': 'error', 'message': f'Simulation failed for ticker {request.ticker}'})}\n\n"
                 return
             yield f"data: {json.dumps({'type': 'status', 'message': 'Simulation completed', 'progress': 80})}\n\n"
@@ -284,8 +319,15 @@ async def _run_background_backtest(job_id: str, request: BacktestRequest):
         period_arg = request.period
         if request.start_date and request.end_date:
             try:
-                start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
-                end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                # Try MM/DD/YY format first
+                try:
+                    start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                    end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                except ValueError:
+                    # Try MM/DD/YYYY format if MM/DD/YY fails
+                    start_dt = datetime.strptime(request.start_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+                    end_dt = datetime.strptime(request.end_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+                
                 period_arg = f"{start_dt}:{end_dt}"
             except Exception:
                 period_arg = request.period
@@ -329,8 +371,15 @@ async def run_multi_symbol_backtest(request: dict):
         end_date = request.get("end_date")
         if start_date and end_date:
             try:
-                start_dt = datetime.strptime(start_date, "%m/%d/%y").strftime("%Y-%m-%d")
-                end_dt = datetime.strptime(end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                # Try MM/DD/YY format first
+                try:
+                    start_dt = datetime.strptime(start_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                except ValueError:
+                    # Try MM/DD/YYYY format if MM/DD/YY fails
+                    start_dt = datetime.strptime(start_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+                
                 period = f"{start_dt}:{end_dt}"
             except Exception:
                 pass
