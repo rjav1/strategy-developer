@@ -27,6 +27,7 @@ interface BacktestResult {
     profit_factor?: number
   }
   trades?: any[]
+  entries?: any[]
   price_data?: any[]
   momentum_periods?: any[]
   error?: string
@@ -1133,19 +1134,29 @@ export default function BacktestEngine() {
           {showTradeLog && (
             <div className="card-glow p-4">
               <h4 className="text-lg font-medium text-white mb-3">Live Trade Log</h4>
-              <div className="space-y-2 max-h-80 overflow-auto">
-                {Object.entries(((liveResults as any)?.individual_results || (backtestResult as any)?.individual_results || {})).flatMap(([symbol, payload]: any) => {
-                  const trades = payload?.trades || []
-                  return trades.map((t: any, idx: number) => (
-                    <div key={`${symbol}-${idx}`} className="flex items-center justify-between text-sm p-2 rounded-lg bg-gray-800/50 border border-white/10">
-                      <div className="flex-1 text-white">{symbol}</div>
-                      <div className="w-32 text-gray-300">{t.entry_date?.slice(0,10)} → {t.exit_date?.slice(0,10) || '-'}</div>
-                      <div className="w-28 text-gray-300">${t.entry_price?.toFixed?.(2) ?? t.entry_price}</div>
-                      <div className={`w-24 ${((t.pnl||0) >= 0)?'text-green-400':'text-red-400'}`}>${(t.pnl||0).toFixed(2)}</div>
-                      <div className="w-24 text-gray-400">{t.entry_reason || ''}</div>
-                    </div>
-                  ))
-                })}
+              <div className="space-y-6">
+                {(() => {
+                  const all = Object.entries(((liveResults as any)?.individual_results || (backtestResult as any)?.individual_results || {})).flatMap(([symbol, payload]: any) => {
+                    const trades = (payload?.trades || []) as any[]
+                    const entries = (payload?.entries || []) as any[]
+                    const entryRows = entries.map(e => ({
+                      type: 'entry',
+                      symbol,
+                      entry_date: e.entry_date,
+                      entry_price: e.entry_price,
+                      status: 'closed',
+                      exit_reason: e.entry_reason || 'Buy',
+                      shares: e.shares,
+                      stop_loss: e.stop_loss,
+                      risk_amount: e.risk_amount,
+                      risk_percentage: e.risk_percentage,
+                      risk_per_share: e.risk_per_share,
+                    }))
+                    const tradeRows = trades.map(t => ({ ...t, symbol }))
+                    return [...entryRows, ...tradeRows]
+                  })
+                  return (<TradeLog trades={all as any} ticker={`All Symbols`} />)
+                })() as any}
               </div>
             </div>
           )}
@@ -1164,8 +1175,19 @@ export default function BacktestEngine() {
               {/* Trade Log */}
               {backtestResult?.trades && backtestResult.trades.length > 0 && (
                 <TradeLog
-                  trades={backtestResult?.trades}
-                  ticker={selectedTickerForBacktest}
+                  trades={((backtestResult?.entries || []).map((e: any) => ({
+                    type: 'entry',
+                    entry_date: e.entry_date,
+                    entry_price: e.entry_price,
+                    status: 'closed',
+                    shares: e.shares,
+                    stop_loss: e.stop_loss,
+                    risk_amount: e.risk_amount,
+                    risk_percentage: e.risk_percentage,
+                    risk_per_share: e.risk_per_share,
+                    exit_reason: 'Buy'
+                  })) as any[]).concat(backtestResult?.trades || [])}
+                   ticker={selectedTickerForBacktest}
                 />
               )}
             </>

@@ -6,6 +6,7 @@ import StockChart from '../../components/StockChart'
 import WatchlistButton from '../../components/WatchlistButton'
 import { useWatchlist } from '../providers/WatchlistProvider'
 import { useScreener } from '../providers/ScreenerProvider'
+import Smooth30DayScroller from '../../components/Smooth30DayScroller'
 
 interface ScreenResult {
   symbol: string
@@ -102,6 +103,7 @@ export default function Screeners() {
   const [minCriteria, setMinCriteria] = useState(3)
   const [topN, setTopN] = useState<number | ''>(20)
   const [period, setPeriod] = useState('6mo')
+  const [topMode, setTopMode] = useState<'all' | 'top'>('top')
   
   // Advanced criteria parameters
   const [minPercentageMove, setMinPercentageMove] = useState(30.0)
@@ -211,6 +213,9 @@ export default function Screeners() {
         
         const requestBody = {
           symbols: symbols,
+          period,
+          min_criteria: Math.max(0, Number(minCriteria) || 0),
+          top_n: topMode === 'top' ? (typeof topN === 'number' ? topN : 0) : 0,
           include_bad_setups: includeBadSetups,
           criteria: {
             days_large_move: 30,
@@ -288,9 +293,12 @@ export default function Screeners() {
                       setAllResults(sortedResults)
                       setResults(sortedResults.slice(0, itemsPerPage)) // Show first page
                     } else if (data.type === 'complete') {
+                      const final = Array.isArray(data.results) ? data.results : allResults
+                      setAllResults(final as any)
+                      setResults((final as any).slice(0, itemsPerPage))
                       setProgressMessage('Screening completed!')
                       setProgressPercent(100)
-                      generateAnalysis(allResults, type)
+                      generateAnalysis(final as any, type)
                     } else if (data.type === 'error') {
                       console.error('Screening error:', data.error)
                     }
@@ -411,6 +419,7 @@ export default function Screeners() {
   const analyzeMomentumPattern = async (symbol: string) => {
     setAnalyzingSymbol(symbol)
     setMomentumAnalysis(null)
+    setChartHtml(null)
     setShowMomentumModal(true)
     
     try {
@@ -565,6 +574,9 @@ export default function Screeners() {
     }
   }
 
+  const [chartHtml, setChartHtml] = useState<string | null>(null)
+  const [scrollerData, setScrollerData] = useState<{priceData:any[], trades:any[], periods:any[]}>({priceData:[], trades:[], periods:[]})
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-black p-6 space-y-8">
       <div className="flex justify-between items-center">
@@ -616,11 +628,21 @@ export default function Screeners() {
           </div>
           <div>
             <label className="block text-sm font-semibold text-gray-300 mb-3">Top Results</label>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setTopMode('all')}
+                className={`px-4 h-12 rounded-xl border ${topMode==='all'?'bg-purple-600 text-white border-purple-500':'bg-gray-800/80 text-gray-300 border-gray-600/50'}`}
+              >Show All</button>
+              <button
+                onClick={() => setTopMode('top')}
+                className={`px-4 h-12 rounded-xl border ${topMode==='top'?'bg-purple-600 text-white border-purple-500':'bg-gray-800/80 text-gray-300 border-gray-600/50'}`}
+              >Top</button>
             <input 
               type="text" 
               inputMode="numeric"
               pattern="[0-9]*"
               value={topN} 
+                disabled={topMode==='all'}
               onChange={(e) => {
                 const value = e.target.value.replace(/[^0-9]/g, '')
                 if (value === '') {
@@ -629,8 +651,9 @@ export default function Screeners() {
                   setTopN(parseInt(value))
                 }
               }}
-              className="w-full h-12 px-4 bg-gradient-to-r from-gray-800/80 to-gray-700/80 border border-gray-600/50 rounded-xl text-white font-medium focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all duration-200 backdrop-blur-sm"
+                className="flex-1 h-12 px-4 bg-gradient-to-r from-gray-800/80 to-gray-700/80 border border-gray-600/50 rounded-xl text-white font-medium focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all duration-200 backdrop-blur-sm"
             />
+            </div>
           </div>
           <div>
             <label className="block text-sm font-semibold text-gray-300 mb-3">Min Criteria (out of 6)</label>
@@ -642,10 +665,10 @@ export default function Screeners() {
               onChange={(e) => {
                 const value = e.target.value.replace(/[^0-9]/g, '')
                 if (value === '') {
-                  setMinCriteria(3)
+                  setMinCriteria(0)
                 } else {
                   const num = parseInt(value)
-                  setMinCriteria(Math.min(Math.max(num, 1), 6))
+                  setMinCriteria(Math.min(Math.max(num, 0), 6))
                 }
               }}
               className="w-full h-12 px-4 bg-gradient-to-r from-gray-800/80 to-gray-700/80 border border-gray-600/50 rounded-xl text-white font-medium focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all duration-200 backdrop-blur-sm"
@@ -1111,37 +1134,102 @@ export default function Screeners() {
                     </div>
                   </div>
 
-                  {/* Interactive Chart */}
-                  {momentumAnalysis.chart_image_base64 && (
+                  {/* On-demand Chart Loader */}
+                  <div className="flex items-center justify-center">
+                    {!chartHtml ? (
+                      <button
+                        onClick={async () => {
+                          try {
+                            setError('')
+                            // Build Smooth30DayScroller data using ticker endpoint and analyzer details
+                            const priceRes = await fetch(`http://localhost:8000/ticker/${momentumAnalysis.symbol}?range=${period}`)
+                            if (!priceRes.ok) throw new Error(`price fetch failed (${priceRes.status})`)
+                            const p = await priceRes.json()
+                            const datesArr = p.timestamps || p.dates || []
+                            if (!Array.isArray(datesArr) || datesArr.length === 0) throw new Error('no price data')
+                            const priceData = datesArr.map((_: any, i: number) => ({
+                              date: datesArr[i],
+                              open: p.opens?.[i] ?? null,
+                              high: p.highs?.[i] ?? null,
+                              low: p.lows?.[i] ?? null,
+                              close: p.prices?.[i] ?? null,
+                              volume: p.volumes?.[i] ?? 0,
+                              sma10: undefined,
+                              sma20: undefined,
+                              sma50: undefined,
+                            }))
+                            // Fetch detected spans (all moves + consolidations) for highlight
+                            let spans: any = null
+                            try {
+                              const sres = await fetch(`http://localhost:8000/analyze/momentum_pattern_chart/${momentumAnalysis.symbol}?period=${period}`)
+                              if (sres.ok) spans = await sres.json()
+                            } catch (e) {
+                              console.warn('span fetch failed', e)
+                            }
+                            const periods: any[] = []
+                            if (spans && spans.spans) {
+                              const momentumArr = Array.isArray(spans.spans.momentum) ? spans.spans.momentum : []
+                              const consolidationArr = Array.isArray(spans.spans.consolidation) ? spans.spans.consolidation : []
+                              momentumArr.forEach((m: any) => periods.push({ type: 'momentum', start_date: m.start_date, end_date: m.end_date }))
+                              consolidationArr.forEach((c: any) => periods.push({ type: 'consolidation', start_date: c.start_date, end_date: c.end_date }))
+                            } else {
+                              // Fallback to single-span based on current analysis
+                              const c1 = ((momentumAnalysis as any).criteria_details || {}).criterion1
+                              if (c1 && c1.start_candle !== -1 && c1.end_candle !== -1 && priceData.length) {
+                                const startIdx = Math.max(0, c1.start_candle)
+                                const endIdx = Math.min(priceData.length-1, c1.end_candle)
+                                periods.push({ type: 'momentum', start_date: priceData[startIdx].date, end_date: priceData[endIdx].date })
+                              }
+                              const c23 = ((momentumAnalysis as any).criteria_details || {}).criterion2_3
+                              if (c23 && typeof c23.consolidation_start_idx !== 'undefined' && typeof c23.consolidation_end_idx !== 'undefined' && priceData.length) {
+                                const s = Math.max(0, c23.consolidation_start_idx)
+                                const e = Math.min(priceData.length-1, c23.consolidation_end_idx)
+                                periods.push({ type: 'consolidation', start_date: priceData[s].date, end_date: priceData[e].date })
+                              }
+                            }
+                            setScrollerData({ priceData, trades: [], periods })
+                            setChartHtml('scroller')
+                          } catch (e: any) {
+                            console.error('Show Chart failed:', e)
+                            setError(`Failed to load chart: ${e?.message || 'unknown error'}`)
+                          }
+                        }}
+                        className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg"
+                      >
+                        Show Chart
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setChartHtml(null)}
+                        className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg"
+                      >
+                        Hide Chart
+                      </button>
+                    )}
+                  </div>
+
+                  {chartHtml === 'scroller' && (
                     <div className="card-glow p-6">
-                      <h3 className="text-lg font-semibold text-white mb-4">Interactive Technical Analysis Chart</h3>
+                      <Smooth30DayScroller
+                        priceData={scrollerData.priceData}
+                        trades={scrollerData.trades}
+                        momentumPeriods={scrollerData.periods}
+                        ticker={momentumAnalysis.symbol}
+                      />
+                    </div>
+                  )}
+
+                  {chartHtml && chartHtml !== 'scroller' && (
+                    <div className="card-glow p-6">
+                      <h3 className="text-lg font-semibold text-white mb-4">Interactive Chart</h3>
                       <div className="bg-gray-900 rounded-lg p-2 overflow-hidden">
                         <iframe
-                          srcDoc={momentumAnalysis.chart_image_base64}
+                          srcDoc={chartHtml}
                           className="w-full"
-                          style={{ 
-                            minHeight: '600px', 
-                            border: 'none',
-                            backgroundColor: 'transparent'
-                          }}
-                          title={`${momentumAnalysis.symbol} Momentum Analysis Chart`}
+                          style={{ minHeight: '600px', border: 'none', backgroundColor: 'transparent' }}
+                          title={`${momentumAnalysis.symbol} Momentum Chart`}
                           sandbox="allow-scripts allow-same-origin"
                         />
-                        {/* Debug info */}
-                        <div className="text-xs text-gray-500 mt-2">
-                          Chart data length: {momentumAnalysis.chart_image_base64?.length || 0} characters
-                          {momentumAnalysis.chart_image_base64 && (
-                            <div>
-                              Preview: {momentumAnalysis.chart_image_base64.substring(0, 100)}...
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="mt-4 text-sm text-muted-foreground">
-                        <p>• Interactive chart with SMA10, SMA20, and SMA50 moving averages</p>
-                        <p>• Hover over lines for detailed price information</p>
-                        <p>• Zoom, pan, and download chart functionality available</p>
-                        <p>• Green/red candlesticks show daily price action</p>
                       </div>
                     </div>
                   )}

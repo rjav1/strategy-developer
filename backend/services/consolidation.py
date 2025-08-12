@@ -38,7 +38,8 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
 
     rolling_validation_passed = True
     rolling_details = []
-
+    actual_consolidation_end = len(consolidation_data) - 1  # Default to end of available data
+    
     for period_end in range(3, len(consolidation_data) + 1):
         period_data = consolidation_data.iloc[:period_end]
         if len(period_data) > 1:
@@ -61,10 +62,14 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
             'period_volume': round(period_avg_volume, 0)
         })
 
+        # Track when consolidation criteria are no longer met
         if len(rolling_details) >= 2:
             prev_passed = rolling_details[-2]['period_passes']
             curr_passed = rolling_details[-1]['period_passes']
             if prev_passed and not curr_passed:
+                # Consolidation criteria failed at this point
+                # Check if it recovers in future periods
+                recovery_found = False
                 for future_end in range(period_end + 1, len(consolidation_data) + 1):
                     future_data = consolidation_data.iloc[:future_end]
                     if len(future_data) > 1:
@@ -78,25 +83,38 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
                     future_passes_volume = future_avg_volume < move_avg_volume
                     future_passes = future_passes_adr and future_passes_volume
                     if future_passes:
-                        rolling_validation_passed = False
+                        recovery_found = True
                         break
-                if not rolling_validation_passed:
+                
+                if not recovery_found:
+                    # Consolidation definitively ended here
+                    actual_consolidation_end = period_end - 2  # End at the last passing period
+                    rolling_validation_passed = False
                     break
 
-    consolidation_avg_adr = consolidation_daily_ranges.mean() if len(consolidation_daily_ranges) > 0 else 0
-    consolidation_avg_volume = consolidation_data['Volume'].mean()
+    # Calculate final metrics using only the actual consolidation period
+    actual_consolidation_data = consolidation_data.iloc[:actual_consolidation_end + 1]
+    
+    if len(actual_consolidation_data) > 1:
+        actual_adr_data = actual_consolidation_data.iloc[1:]
+        actual_consolidation_daily_ranges = abs(actual_adr_data['High'] - actual_adr_data['Low']) / actual_adr_data['Close'] * 100
+        consolidation_avg_adr = actual_consolidation_daily_ranges.mean() if len(actual_consolidation_daily_ranges) > 0 else 0
+    else:
+        consolidation_avg_adr = 0
+    
+    consolidation_avg_volume = actual_consolidation_data['Volume'].mean()
     move_avg_volume = move_data['Volume'].mean()
 
     volume_criterion_met = consolidation_avg_volume < move_avg_volume
     range_criterion_met = consolidation_avg_adr < move_avg_adr
 
-    first_consolidation_close = consolidation_data.iloc[0]['Close']
-    most_recent_close = consolidation_data.iloc[-1]['Close']
+    first_consolidation_close = actual_consolidation_data.iloc[0]['Close']
+    most_recent_close = actual_consolidation_data.iloc[-1]['Close']
     price_difference = abs(most_recent_close - first_consolidation_close)
     price_difference_adr = price_difference / first_consolidation_close * 100
 
     # New rule: During consolidation, price at close must never dip below 80% of the first consolidation close
-    min_consolidation_close = consolidation_data['Close'].min()
+    min_consolidation_close = actual_consolidation_data['Close'].min()
     min_close_pct_of_start = (min_consolidation_close / first_consolidation_close * 100) if first_consolidation_close != 0 else 0
     price_floor_criterion_met = min_consolidation_close >= first_consolidation_close * 0.8
 
@@ -104,7 +122,7 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     price_criterion_met = price_difference_adr <= stability_threshold
 
     consolidation_found = (
-        consolidation_candles >= 3 and
+        len(actual_consolidation_data) >= 3 and
         first_candle_criterion_met and
         rolling_validation_passed and
         volume_criterion_met and
@@ -115,9 +133,10 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
 
     consolidation_details = {
         'met': consolidation_found,
-        'consolidation_candles': consolidation_candles,
+        'consolidation_candles': len(actual_consolidation_data),
         'consolidation_start_idx': consolidation_start_idx,
-        'consolidation_end_idx': len(df) - 1,
+        'consolidation_end_idx': consolidation_start_idx + actual_consolidation_end,  # Actual end based on criteria
+        'actual_consolidation_end_relative': actual_consolidation_end,
         'first_candle_criterion_met': first_candle_criterion_met,
         'first_consolidation_adr': round(first_consolidation_adr, 2),
         'move_start_adr': round(move_start_adr, 2),
@@ -139,7 +158,8 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         'first_consolidation_close': round(first_consolidation_close, 2),
         'most_recent_close': round(most_recent_close, 2),
         'description': (
-            f"Enhanced Consolidation: {consolidation_candles} days, first candle ADR {first_consolidation_adr:.1f}% vs move start {move_start_adr:.1f}%, "
+            f"Enhanced Consolidation: {len(actual_consolidation_data)} days (ends at idx {consolidation_start_idx + actual_consolidation_end}), "
+            f"first candle ADR {first_consolidation_adr:.1f}% vs move start {move_start_adr:.1f}%, "
             f"rolling validation {'PASSED' if rolling_validation_passed else 'FAILED'}, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, "
             f"ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}% (excluding first candle), close diff {price_difference_adr:.1f}% (≤{stability_threshold:.1f}%), "
             f"price floor {'PASSED' if price_floor_criterion_met else 'FAILED'} (start: ${first_consolidation_close:.2f}, floor: ${first_consolidation_close * 0.8:.2f}, lowest: ${min_consolidation_close:.2f})"

@@ -26,6 +26,9 @@ interface Trade {
   risk_amount?: number
   risk_percentage?: number
   risk_per_share?: number
+  // Optional to support entry rows merged in by parent
+  type?: 'entry' | 'trade'
+  symbol?: string
 }
 
 interface TradeLogProps {
@@ -176,6 +179,10 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
           <table className="w-full">
             <thead className="bg-card/30 border-b border-white/10">
               <tr>
+                {/* Optional Symbol column when provided */}
+                {trades.some(t => !!(t as any).symbol) && (
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Symbol</th>
+                )}
                 <th className="text-left p-4 text-sm font-medium text-muted-foreground">
                   Status
                 </th>
@@ -193,6 +200,9 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
                 </th>
                 <th className="text-left p-4 text-sm font-medium text-muted-foreground">
                   Shares
+                </th>
+                <th className="text-left p-4 text-sm font-medium text-muted-foreground">
+                  $ Size
                 </th>
                 <th className="text-left p-4 text-sm font-medium text-muted-foreground">
                   Stop Loss
@@ -219,16 +229,32 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
                     trade.pnl ? getPerformanceBg(trade.pnl) : ''
                   }`}
                 >
+                  {/* Symbol column if present */}
+                  {trades.some(t => !!(t as any).symbol) && (
+                    <td className="p-4">
+                      <span className="text-white text-sm font-mono">{(trade as any).symbol || ''}</span>
+                    </td>
+                  )}
                   <td className="p-4">
                     <div className="flex items-center gap-2">
-                      {trade.status === 'open' ? (
+                      {trade.type === 'entry' ? (
+                        <div className="flex items-center gap-2 text-green-400">
+                          <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                          <span className="text-xs font-medium uppercase">Entry</span>
+                        </div>
+                      ) : trade.exit_reason && trade.exit_reason.toLowerCase().startsWith('trim') ? (
+                        <div className="flex items-center gap-2 text-yellow-400">
+                          <div className="w-2 h-2 bg-yellow-400 rounded-full"></div>
+                          <span className="text-xs font-medium uppercase">Trim</span>
+                        </div>
+                      ) : trade.status === 'open' ? (
                         <div className="flex items-center gap-2 text-blue-400">
                           <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
                           <span className="text-xs font-medium uppercase">Open</span>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-2 text-gray-400">
-                          <div className="w-2 h-2 bg-gray-400 rounded-full"></div>
+                        <div className="flex items-center gap-2 text-red-400">
+                          <div className="w-2 h-2 bg-red-400 rounded-full"></div>
                           <span className="text-xs font-medium uppercase">Closed</span>
                         </div>
                       )}
@@ -284,6 +310,15 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
                     )}
                   </td>
                   <td className="p-4">
+                    {trade.shares ? (
+                      <span className="text-white text-sm font-mono">
+                        {formatCurrency((trade.shares || 0) * (trade.exit_price || trade.entry_price || 0))}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground text-sm">-</span>
+                    )}
+                  </td>
+                  <td className="p-4">
                     {trade.stop_loss ? (
                       <span className="text-red-300 text-sm font-mono">
                         {formatCurrency(trade.stop_loss)}
@@ -293,21 +328,23 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
                     )}
                   </td>
                   <td className="p-4">
-                    {trade.risk_amount && trade.risk_percentage ? (
+                    {typeof trade.risk_amount === 'number' ? (
                       <div className="text-sm">
                         <div className="text-orange-300 font-mono">
                           {formatCurrency(trade.risk_amount)}
                         </div>
-                        <div className="text-orange-400 text-xs">
-                          ({trade.risk_percentage.toFixed(2)}%)
-                        </div>
+                        {typeof trade.risk_percentage === 'number' && (
+                          <div className="text-orange-400 text-xs">
+                            ({(trade.risk_percentage || 0).toFixed(2)}%)
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <span className="text-muted-foreground text-sm">-</span>
                     )}
                   </td>
                   <td className="p-4">
-                    {trade.holding_period ? (
+                    {typeof trade.holding_period === 'number' ? (
                       <div className="flex items-center gap-2">
                         <Clock className="h-3 w-3 text-muted-foreground" />
                         <span className="text-white text-sm">
@@ -319,7 +356,7 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
                     )}
                   </td>
                   <td className="p-4 text-right">
-                    {trade.pnl !== undefined ? (
+                    {typeof trade.pnl === 'number' ? (
                       <div className="flex items-center justify-end gap-2">
                         <DollarSign className={`h-3 w-3 ${getPerformanceColor(trade.pnl)}`} />
                         <span className={`text-sm font-bold ${getPerformanceColor(trade.pnl)}`}>

@@ -51,6 +51,7 @@ interface Smooth30DayScrollerProps {
   momentumPeriods: any[]
   ticker: string
   isLoading?: boolean
+  initialWindowDays?: number
 }
 
 interface ViewportState {
@@ -78,7 +79,8 @@ export default function Smooth30DayScroller({
   trades, 
   momentumPeriods, 
   ticker,
-  isLoading = false 
+  isLoading = false,
+  initialWindowDays
 }: Smooth30DayScrollerProps) {
   
   // Debug: Log all incoming data with extensive details
@@ -118,8 +120,9 @@ export default function Smooth30DayScroller({
   }
   console.log('='.repeat(80))
   
-  // Fixed 30-day window with smooth animation
-  const [windowDays] = useState(30) // Fixed 30 days as requested
+  // Fixed 30-day window with smooth animation (now adjustable)
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000
+  const [windowDays, setWindowDays] = useState<number>(initialWindowDays || 30)
   const [driftSpeed, setDriftSpeed] = useState(1.0) // days per second
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentPosition, setCurrentPosition] = useState(0) // Position in milliseconds from start
@@ -150,9 +153,13 @@ export default function Smooth30DayScroller({
     return { startTime, endTime, duration }
   }, [priceData])
   
+  const fullDays = useMemo(() => {
+    return dataBounds.duration > 0 ? Math.ceil(dataBounds.duration / ONE_DAY_MS) : 30
+  }, [dataBounds.duration])
+  
   // Calculate visible window bounds based on current position
   const windowBounds = useMemo(() => {
-    const windowMs = windowDays * 24 * 60 * 60 * 1000 // Convert days to milliseconds
+    const windowMs = windowDays * ONE_DAY_MS // Convert days to milliseconds
     const currentTime = dataBounds.startTime + currentPosition
     const windowStart = currentTime
     const windowEnd = currentTime + windowMs
@@ -175,18 +182,21 @@ export default function Smooth30DayScroller({
       ? windowDays / zoomLevel 
       : windowDays
     
+    // If window covers entire dataset, return all
+    if (effectiveWindowDays >= fullDays) return priceData
+    
     // Calculate the center of the current window
     const windowCenter = windowBounds.windowStart + (windowBounds.windowEnd - windowBounds.windowStart) / 2
     
     // Calculate the expanded window bounds
-    const expandedWindowStart = windowCenter - (effectiveWindowDays * 24 * 60 * 60 * 1000) / 2
-    const expandedWindowEnd = windowCenter + (effectiveWindowDays * 24 * 60 * 60 * 1000) / 2
+    const expandedWindowStart = windowCenter - (effectiveWindowDays * ONE_DAY_MS) / 2
+    const expandedWindowEnd = windowCenter + (effectiveWindowDays * ONE_DAY_MS) / 2
     
     return priceData.filter(candle => {
       const candleTime = new Date(candle.date).getTime()
       return candleTime >= expandedWindowStart && candleTime <= expandedWindowEnd
     })
-  }, [priceData, windowBounds, zoomMode, zoomLevel, windowDays])
+  }, [priceData, windowBounds, zoomMode, zoomLevel, windowDays, fullDays])
   
   // Get visible trades (using same expanded window as visibleData)
   const visibleTrades = useMemo(() => {
@@ -201,8 +211,8 @@ export default function Smooth30DayScroller({
       : windowDays
     
     const windowCenter = windowBounds.windowStart + (windowBounds.windowEnd - windowBounds.windowStart) / 2
-    const expandedWindowStart = windowCenter - (effectiveWindowDays * 24 * 60 * 60 * 1000) / 2
-    const expandedWindowEnd = windowCenter + (effectiveWindowDays * 24 * 60 * 60 * 1000) / 2
+    const expandedWindowStart = windowCenter - (effectiveWindowDays * ONE_DAY_MS) / 2
+    const expandedWindowEnd = windowCenter + (effectiveWindowDays * ONE_DAY_MS) / 2
     
     console.log('📅 Window bounds:', {
       expandedWindowStart: new Date(expandedWindowStart).toISOString(),
@@ -269,8 +279,8 @@ export default function Smooth30DayScroller({
       : windowDays
     
     const windowCenter = windowBounds.windowStart + (windowBounds.windowEnd - windowBounds.windowStart) / 2
-    const expandedWindowStart = windowCenter - (effectiveWindowDays * 24 * 60 * 60 * 1000) / 2
-    const expandedWindowEnd = windowCenter + (effectiveWindowDays * 24 * 60 * 60 * 1000) / 2
+    const expandedWindowStart = windowCenter - (effectiveWindowDays * ONE_DAY_MS) / 2
+    const expandedWindowEnd = windowCenter + (effectiveWindowDays * ONE_DAY_MS) / 2
     
     // First, normalize all periods and filter by window
     const normalizedPeriods = momentumPeriods
@@ -1074,6 +1084,18 @@ export default function Smooth30DayScroller({
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-semibold text-white">30-Day Smooth Scroller</h3>
         <div className="flex items-center gap-2">
+          {/* Window toggle */}
+          <div className="flex items-center gap-2 mr-2">
+            <span className="text-sm text-gray-300">Window:</span>
+            <button
+              onClick={() => setWindowDays(30)}
+              className={`px-3 py-1 rounded ${windowDays < fullDays ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-200'}`}
+            >30d</button>
+            <button
+              onClick={() => { setWindowDays(fullDays); setIsPlaying(false) }}
+              className={`px-3 py-1 rounded ${windowDays >= fullDays ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-200'}`}
+            >Full</button>
+          </div>
           <button
             onClick={() => setShowPlotlyView(true)}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors text-sm"
@@ -1221,20 +1243,26 @@ export default function Smooth30DayScroller({
               min="0"
               max="100"
               step="0.1"
-              value={timelineValue}
-              onChange={handleTimelineChange}
-              onInput={handleTimelineInput}
-              className="flex-1 h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider"
+              value={progress}
+              onChange={(e) => {
+                const value = parseFloat(e.target.value)
+                const maxPosition = Math.max(0, dataBounds.duration - (windowDays * ONE_DAY_MS))
+                const newPosition = (value / 100) * maxPosition
+                setCurrentPosition(newPosition)
+                setIsPlaying(false)
+              }}
+              disabled={windowDays >= fullDays}
+              className="flex-1 h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider disabled:opacity-50"
               style={{
-                background: `linear-gradient(to right, #8b5cf6 0%, #8b5cf6 ${timelineValue}%, #374151 ${timelineValue}%, #374151 100%)`
+                background: `linear-gradient(to right, #8b5cf6 0%, #8b5cf6 ${progress}%, #374151 ${progress}%, #374151 100%)`
               }}
             />
             <span className="text-sm text-gray-300 min-w-[80px]">
-              {Math.round(timelineValue)}%
+              {Math.round(progress)}%
             </span>
           </div>
           <div className="text-sm text-gray-400 min-w-[200px]">
-            {formatDateRange(windowBounds.startDate, windowBounds.endDate)}
+            {new Date(windowBounds.startDate).toLocaleDateString()} - {new Date(windowBounds.endDate).toLocaleDateString()}
           </div>
         </div>
         

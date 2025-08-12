@@ -151,6 +151,12 @@ class Trade:
     holding_days: int = 0
     max_gain: float = 0.0
     max_loss: float = 0.0
+    # Risk fields for UI
+    risk_amount: float = 0.0
+    risk_percentage: float = 0.0
+    risk_per_share: float = 0.0
+    # Grouping identifier for an entire position (entries + trims + final exit)
+    trade_id: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert trade to dictionary for JSON serialization"""
@@ -168,7 +174,11 @@ class Trade:
             'pnl_percent': round(self.pnl_percent, 2),
             'holding_days': self.holding_days,
             'max_gain': round(self.max_gain, 2),
-            'max_loss': round(self.max_loss, 2)
+            'max_loss': round(self.max_loss, 2),
+            'risk_amount': round(self.risk_amount, 2),
+            'risk_percentage': round(self.risk_percentage, 2),
+            'risk_per_share': round(self.risk_per_share, 4),
+            'trade_id': self.trade_id
         }
 
 @dataclass
@@ -271,6 +281,17 @@ class EnhancedMomentumBacktester:
         # Performance tracking
         self.daily_equity: List[float] = []
         self.daily_returns: List[float] = []
+        
+        # Progressive trim/stop tracking
+        self.initial_risk_per_share: float = 0.0
+        self.next_trim_multiple: float = 2.0  # 2R to start, then doubles each trim
+        self.enable_progressive_trims: bool = True
+        
+        # Store entry rows for UI Trade Log (non-PnL informational rows)
+        self.entry_events: List[Dict[str, Any]] = []
+        
+        # Unique trade identifier sequence
+        self.trade_seq: int = 0
         
         log_info(f"Enhanced MomentumBacktester initialized for {self.ticker}", {"ticker": self.ticker}, "backtest")
     
@@ -440,7 +461,7 @@ class EnhancedMomentumBacktester:
                                     event_type='consolidation_end',
                                     price=self.current_consolidation_period.end_price,
                                     volume=int(lookback_data.loc[self.current_consolidation_period.end_date]['Volume']),
-                                    details={}
+                                    details=consolidation_details
                                 ))
                             
                             # Create new consolidation period
@@ -471,13 +492,63 @@ class EnhancedMomentumBacktester:
         return events
     
     def check_buy_signal(self, current_date: datetime, current_row: pd.Series, consolidation_high: float = None) -> bool:
-        """Check for buy signal when in CONSOLIDATION state - breakout above consolidation range with volume"""
+        """Check for buy signal when in CONSOLIDATION state - breakout above consolidation range with volume + additional criteria"""
         if self.state != TradingState.CONSOLIDATION:
             return False
         
-        current_high = current_row['High']
+        current_close = current_row['Close']  # Use CLOSE instead of HIGH for breakout
         current_volume = current_row['Volume']
         current_idx = self.daily_data.index.get_loc(current_date)
+        
+        # ADDITIONAL CRITERIA: Check 50-day moving average and ADR range
+        # These are the same criteria used in the screener that we want to enforce in the backtester
+        
+        # Criterion 1: Current price above 50-day moving average
+        sma50 = self.daily_data.iloc[current_idx]['SMA50'] if 'SMA50' in self.daily_data.columns else None
+        if sma50 is None or pd.isna(sma50):
+            log_warn(f"❌ No SMA50 available for {current_date.date()}", {
+                "ticker": self.ticker,
+                "date": current_date.date().isoformat()
+            }, "backtest")
+            return False
+        
+        price_above_sma50 = current_close > sma50
+        if not price_above_sma50:
+            log_info(f"❌ Price ${current_close:.2f} below 50-day SMA ${sma50:.2f} on {current_date.date()}", {
+                "ticker": self.ticker,
+                "current_close": current_close,
+                "sma50": sma50,
+                "date": current_date.date().isoformat()
+            }, "backtest")
+            return False
+        
+        # Criterion 2: ADR range between 3-20%
+        current_adr = self.daily_data.iloc[current_idx]['ADR_20'] if 'ADR_20' in self.daily_data.columns else None
+        if current_adr is None or pd.isna(current_adr):
+            log_warn(f"❌ No ADR_20 available for {current_date.date()}", {
+                "ticker": self.ticker,
+                "date": current_date.date().isoformat()
+            }, "backtest")
+            return False
+        
+        adr_in_range = 3.0 <= current_adr <= 20.0
+        if not adr_in_range:
+            log_info(f"❌ ADR {current_adr:.1f}% outside range (3-20%) on {current_date.date()}", {
+                "ticker": self.ticker,
+                "current_adr": current_adr,
+                "min_adr": 3.0,
+                "max_adr": 20.0,
+                "date": current_date.date().isoformat()
+            }, "backtest")
+            return False
+        
+        log_info(f"✅ Additional criteria PASSED: Price ${current_close:.2f} > SMA50 ${sma50:.2f}, ADR {current_adr:.1f}% in range (3-20%)", {
+            "ticker": self.ticker,
+            "current_close": current_close,
+            "sma50": sma50,
+            "current_adr": current_adr,
+            "date": current_date.date().isoformat()
+        }, "backtest")
         
         # Get consolidation high from momentum screener results (EXCLUDING current day)
         if consolidation_high is None:
@@ -501,6 +572,8 @@ class EnhancedMomentumBacktester:
                             "ticker": self.ticker,
                             "consolidation_low": consolidation_low,
                             "consolidation_high": consolidation_high,
+                            "consol_start_idx": consol_start_idx,
+                            "consol_end_idx": consol_end_idx,
                             "date": current_date.date().isoformat()
                         }, "backtest")
             except Exception as e:
@@ -520,16 +593,18 @@ class EnhancedMomentumBacktester:
         # Calculate 20-day average volume
         avg_volume_20 = self.daily_data.iloc[max(0, current_idx-20):current_idx]['Volume'].mean()
         
-        # Entry conditions: breakout above consolidation high + volume above 20-day average
-        breakout = current_high > consolidation_high
+        # Entry conditions: CLOSE above consolidation high + volume above 20-day average
+        breakout = current_close > consolidation_high
         volume_confirmation = current_volume > avg_volume_20
         
-        log_info(f"🎯 Buy Signal Check {current_date.date()}: High={current_high:.2f} vs Consol={consolidation_high:.2f}, Vol={current_volume:.0f} vs Avg={avg_volume_20:.0f}", {
+        log_info(f"🎯 Buy Signal Check {current_date.date()}: Close={current_close:.2f} vs Consol={consolidation_high:.2f}, Vol={current_volume:.0f} vs Avg={avg_volume_20:.0f}", {
             "ticker": self.ticker,
-            "current_high": current_high,
+            "current_close": current_close,
             "consolidation_high": consolidation_high,
             "current_volume": current_volume,
             "avg_volume_20": avg_volume_20,
+            "breakout": breakout,
+            "volume_confirmation": volume_confirmation,
             "date": current_date.date().isoformat()
         }, "backtest")
         log_info(f"   Breakout: {breakout}, Volume OK: {volume_confirmation}", {
@@ -539,29 +614,51 @@ class EnhancedMomentumBacktester:
             "date": current_date.date().isoformat()
         }, "backtest")
         
-        return breakout and volume_confirmation
+        # ALL criteria must be met: price above SMA50 + ADR in range + breakout + volume
+        all_criteria_met = price_above_sma50 and adr_in_range and breakout and volume_confirmation
+        
+        if all_criteria_met:
+            log_info(f"🟢 ALL CRITERIA PASSED: Buy signal confirmed for {current_date.date()}", {
+                "ticker": self.ticker,
+                "price_above_sma50": price_above_sma50,
+                "adr_in_range": adr_in_range,
+                "breakout": breakout,
+                "volume_confirmation": volume_confirmation,
+                "date": current_date.date().isoformat()
+            }, "backtest")
+        else:
+            log_info(f"❌ CRITERIA FAILED: Buy signal rejected for {current_date.date()}", {
+                "ticker": self.ticker,
+                "price_above_sma50": price_above_sma50,
+                "adr_in_range": adr_in_range,
+                "breakout": breakout,
+                "volume_confirmation": volume_confirmation,
+                "date": current_date.date().isoformat()
+            }, "backtest")
+        
+        return all_criteria_met
     
     def check_sell_signal(self, current_date: datetime, current_row: pd.Series) -> Tuple[bool, str]:
-        """Check for sell signal when in IN_POSITION state - close below breakout day low OR 20-day SMA (whichever higher)"""
+        """Check for sell signal when in IN_POSITION state - close below dynamic stop OR 20-day SMA (whichever higher)"""
         if self.state != TradingState.IN_POSITION or self.current_trade is None:
             return False, ""
         
         current_close = current_row['Close']
         
-        # Use stored breakout day low
-        breakout_day_low = self.breakout_day_low
+        # Use dynamic stop (initially breakout day low; later may be raised to breakeven)
+        dynamic_stop = self.current_trade.stop_loss if self.current_trade.stop_loss is not None else self.breakout_day_low
         
         # Get 20-day SMA
         current_idx = self.daily_data.index.get_loc(current_date)
         sma_20 = self.daily_data.iloc[current_idx]['SMA20'] if 'SMA20' in self.daily_data.columns else 0
         
-        # Exit level is the higher of: breakout day low OR 20-day SMA
+        # Exit level is the higher of: dynamic stop OR 20-day SMA
         if not pd.isna(sma_20) and sma_20 > 0:
-            exit_level = max(breakout_day_low, sma_20)
-            reason = "Below Breakout Low" if exit_level == breakout_day_low else "Below 20-day SMA"
+            exit_level = max(dynamic_stop, sma_20)
+            reason = "Below Dynamic Stop" if exit_level == dynamic_stop else "Below 20-day SMA"
         else:
-            exit_level = breakout_day_low
-            reason = "Below Breakout Low"
+            exit_level = dynamic_stop
+            reason = "Below Dynamic Stop"
         
         # Sell if close below exit level
         if current_close < exit_level:
@@ -603,21 +700,33 @@ class EnhancedMomentumBacktester:
         # Ensure minimum position of at least 1 share
         shares = max(1, shares)
         
+        # Risk fields
+        actual_risk_amount = max_risk_amount if risk_per_share > 0 else shares * (buy_price * 0.01)
+        risk_percentage = (actual_risk_amount / portfolio_value) * 100 if portfolio_value > 0 else 0.0
+        
         self.current_trade = Trade(
             entry_date=current_date,
             entry_price=buy_price,
             entry_reason="Momentum Breakout",
             shares=shares,
             stop_loss=initial_stop_loss,  # Use breakout day low as stop loss
-            target_price=buy_price * 1.04
+            target_price=buy_price * 1.04,
+            risk_amount=actual_risk_amount,
+            risk_percentage=risk_percentage,
+            risk_per_share=max(0.0, risk_per_share),
+            trade_id=0
         )
+        
+        # Initialize progressive trim tracking
+        self.initial_risk_per_share = max(0.0, risk_per_share)
+        self.next_trim_multiple = 2.0
         
         self.current_capital -= shares * buy_price
         self.state = TradingState.IN_POSITION
         
-        # Calculate actual risk for logging and event details
-        actual_risk_amount = shares * risk_per_share
-        risk_percentage = (actual_risk_amount / portfolio_value) * 100
+        # Assign a new trade_id for this position
+        self.trade_seq += 1
+        self.current_trade.trade_id = self.trade_seq
         
         event = MarketEvent(
             date=current_date,
@@ -636,6 +745,20 @@ class EnhancedMomentumBacktester:
                 'capital_after': self.current_capital
             }
         )
+        
+        # Add an entry row for UI Trade Log
+        self.entry_events.append({
+            'type': 'entry',
+            'entry_date': current_date.isoformat(),
+            'entry_price': buy_price,
+            'shares': shares,
+            'stop_loss': initial_stop_loss,
+            'risk_amount': round(actual_risk_amount, 2),
+            'risk_percentage': round(risk_percentage, 2),
+            'risk_per_share': round(max(0.0, risk_per_share), 4),
+            'status': 'closed',
+            'entry_reason': 'Buy'
+        })
         
         log_info(f"🟢 BUY: {shares} shares of {self.ticker} at ${buy_price:.2f} on {current_date.date()}", {
             "ticker": self.ticker,
@@ -709,6 +832,67 @@ class EnhancedMomentumBacktester:
             "price": sell_price,
             "reason": reason,
             "pnl": trade_to_complete.pnl,
+            "capital_after": self.current_capital,
+            "date": current_date.date().isoformat()
+        }, "backtest")
+        return event
+
+    def execute_partial_sell(self, current_date: datetime, current_row: pd.Series, shares_to_sell: int, reason: str) -> MarketEvent:
+        """Trim part of the current position without closing the trade."""
+        if self.current_trade is None or shares_to_sell <= 0:
+            raise ValueError("No current trade to trim or invalid share size")
+        
+        shares_to_sell = min(shares_to_sell, self.current_trade.shares)
+        sell_price = current_row['High'] if current_row['High'] > current_row['Close'] else current_row['Close']
+        proceeds = shares_to_sell * sell_price
+        
+        # Record a completed trade slice for the trim so it shows in the trade log and stats
+        trim_trade = Trade(
+            entry_date=self.current_trade.entry_date,
+            entry_price=self.current_trade.entry_price,
+            entry_reason=self.current_trade.entry_reason,
+            exit_date=current_date,
+            exit_price=sell_price,
+            exit_reason=reason,
+            shares=shares_to_sell,
+            stop_loss=self.current_trade.stop_loss,
+            target_price=self.current_trade.target_price,
+            risk_amount=self.current_trade.risk_amount,
+            risk_percentage=self.current_trade.risk_percentage,
+            risk_per_share=self.current_trade.risk_per_share,
+            trade_id=self.current_trade.trade_id
+        )
+        # Compute PnL for the slice
+        trim_trade.holding_days = (current_date - trim_trade.entry_date).days
+        trim_trade.pnl = proceeds - (shares_to_sell * trim_trade.entry_price)
+        trim_trade.pnl_percent = (trim_trade.pnl / (shares_to_sell * trim_trade.entry_price)) * 100 if trim_trade.entry_price > 0 else 0.0
+        self.completed_trades.append(trim_trade)
+        
+        # Update remaining open position
+        self.current_trade.shares -= shares_to_sell
+        self.current_capital += proceeds
+        
+        event = MarketEvent(
+            date=current_date,
+            event_type='partial_sell',
+            price=sell_price,
+            volume=int(current_row['Volume']),
+            details={
+                'shares_sold': shares_to_sell,
+                'shares_remaining': self.current_trade.shares,
+                'proceeds': proceeds,
+                'reason': reason,
+                'capital_after': self.current_capital
+            }
+        )
+        
+        log_info(f"🟠 TRIM: Sold {shares_to_sell} of {self.ticker} at ${sell_price:.2f} on {current_date.date()} ({reason}); remaining {self.current_trade.shares}", {
+            "ticker": self.ticker,
+            "action": "PARTIAL_SELL",
+            "shares_sold": shares_to_sell,
+            "shares_remaining": self.current_trade.shares,
+            "price": sell_price,
+            "reason": reason,
             "capital_after": self.current_capital,
             "date": current_date.date().isoformat()
         }, "backtest")
@@ -921,13 +1105,50 @@ class EnhancedMomentumBacktester:
                         await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             elif self.state == TradingState.IN_POSITION:
-                # Intraday stop-loss enforcement at prior breakout day's low
+                # Progressive trims at 2R, 4R, 8R, ... (sell half and move stop to stepped levels)
+                try:
+                    if self.enable_progressive_trims and self.current_trade is not None and self.initial_risk_per_share > 0:
+                        threshold_price = self.current_trade.entry_price + self.initial_risk_per_share * self.next_trim_multiple
+                        if current_row['High'] >= threshold_price and self.current_trade.shares > 1:
+                            shares_to_sell = max(1, self.current_trade.shares // 2)
+                            reason = f"Trim at {self.next_trim_multiple:.0f}R"
+                            trim_event = self.execute_partial_sell(current_date, current_row, shares_to_sell, reason)
+                            daily_events.append(trim_event)
+                            
+                            # Step the numeric stop to previous multiple: after 2R -> BE, 4R -> 2R, 8R -> 4R, ...
+                            stepped_multiple = self.next_trim_multiple / 2.0
+                            if stepped_multiple <= 1.0:
+                                new_stop = self.current_trade.entry_price
+                            else:
+                                new_stop = self.current_trade.entry_price + (self.initial_risk_per_share * stepped_multiple)
+                            
+                            prev_stop = self.current_trade.stop_loss
+                            self.current_trade.stop_loss = max(prev_stop if prev_stop is not None else new_stop, new_stop)
+                            
+                            # 20SMA is applied as a close condition via check_sell_signal; include for logging
+                            current_idx = self.daily_data.index.get_loc(current_date)
+                            sma_20 = self.daily_data.iloc[current_idx]['SMA20'] if 'SMA20' in self.daily_data.columns else np.nan
+                            log_info(f"🔒 Stop raised to ${self.current_trade.stop_loss:.2f} after trim (prev: ${prev_stop if prev_stop is not None else float('nan'):.2f}); stepped to {stepped_multiple:.0f}R; 20SMA close filter=${float(sma_20) if not pd.isna(sma_20) else None}", {
+                                "ticker": self.ticker,
+                                "new_stop": self.current_trade.stop_loss,
+                                "prev_stop": prev_stop,
+                                "stepped_multiple": stepped_multiple,
+                                "sma20": float(sma_20) if not pd.isna(sma_20) else None,
+                                "date": current_date.date().isoformat()
+                            }, "backtest")
+                            
+                            # Double the next threshold
+                            self.next_trim_multiple *= 2.0
+                except Exception:
+                    pass
+                
+                # Intraday stop-loss enforcement at prior breakout day's low or raised stop
                 try:
                     stop_level = float(self.current_trade.stop_loss) if self.current_trade else None
                 except Exception:
                     stop_level = None
                 if self.current_trade and stop_level is not None and current_row['Low'] <= stop_level:
-                    # Execute at stop level to cap loss at ~1% risk
+                    # Execute at stop level to cap loss or protect gains
                     sell_event = self.execute_sell(current_date, current_row, "Stop loss hit", price_override=stop_level)
                     daily_events.append(sell_event)
                     log_info(f"⛔ STOP: Intraday stop hit at ${stop_level:.2f}", {
@@ -938,7 +1159,7 @@ class EnhancedMomentumBacktester:
                     }, "backtest")
                     await asyncio.sleep(0)
                 else:
-                    # Close-based exit condition remains (below max(breakout low, 20SMA))
+                    # Close-based exit condition remains (below max(dynamic stop, 20SMA))
                     should_sell, sell_reason = self.check_sell_signal(current_date, current_row)
                     if should_sell:
                         sell_event = self.execute_sell(current_date, current_row, sell_reason)
@@ -1058,34 +1279,53 @@ class EnhancedMomentumBacktester:
         # Final performance metrics
         final_metrics = self.backtest_frames[-1].performance_metrics
         
-        # Trade statistics
-        total_trades_count = len(self.completed_trades)
-        winning_trades_count = len([t for t in self.completed_trades if t.pnl > 0])
-        losing_trades_count = len([t for t in self.completed_trades if t.pnl <= 0])
-
+        # Group completed trade slices by trade_id to form full trades
+        trade_groups: Dict[int, List[Trade]] = {}
+        for t in self.completed_trades:
+            trade_groups.setdefault(int(getattr(t, 'trade_id', 0) or 0), []).append(t)
+        # Remove possible zero-ids (should not happen) by mapping each as its own id
+        if 0 in trade_groups and len(trade_groups) == 1:
+            # Fallback: treat each slice as its own group
+            trade_groups = {i+1: [t] for i, t in enumerate(self.completed_trades)}
+        
+        grouped_pnls = [sum(x.pnl for x in slices) for slices in trade_groups.values()]
+        total_trades_count = len(trade_groups)
+        winning_trades_count = sum(1 for p in grouped_pnls if p > 0)
+        losing_trades_count = sum(1 for p in grouped_pnls if p <= 0)
+        total_pnl_sum = sum(grouped_pnls)
+        avg_trade_pnl = (total_pnl_sum / total_trades_count) if total_trades_count > 0 else 0.0
+        avg_win = (sum(p for p in grouped_pnls if p > 0) / max(1, winning_trades_count)) if winning_trades_count > 0 else 0.0
+        avg_loss = (sum(p for p in grouped_pnls if p <= 0) / max(1, losing_trades_count)) if losing_trades_count > 0 else 0.0
+        avg_holding_days = 0.0
+        if total_trades_count > 0:
+            holding_days_list = [max((s.holding_days for s in slices), default=0) for slices in trade_groups.values()]
+            avg_holding_days = sum(holding_days_list) / max(1, len(holding_days_list))
+        
         # Robust profit factor using sums of wins/losses (not averages)
-        wins_sum = float(sum(t.pnl for t in self.completed_trades if t.pnl > 0))
-        losses_sum_abs = float(abs(sum(t.pnl for t in self.completed_trades if t.pnl <= 0)))
+        wins_sum = float(sum(p for p in grouped_pnls if p > 0))
+        losses_sum_abs = float(abs(sum(p for p in grouped_pnls if p <= 0)))
         if losses_sum_abs > 0:
             profit_factor_value = wins_sum / losses_sum_abs
             profit_factor_is_infinite = False
         else:
             profit_factor_value = float('inf') if wins_sum > 0 else 0.0
             profit_factor_is_infinite = wins_sum > 0
-
+        
         trade_stats = {
             "total_trades": total_trades_count,
             "winning_trades": winning_trades_count,
             "losing_trades": losing_trades_count,
-            "win_rate": final_metrics.get('win_rate', 0),
-            "total_pnl": final_metrics.get('total_pnl', 0),
+            "win_rate": (winning_trades_count / max(1, total_trades_count)) * 100.0,
+            "total_pnl": total_pnl_sum,
             "total_return_pct": final_metrics.get('total_return_pct', 0),
             "max_drawdown": final_metrics.get('max_drawdown', 0),
-            "avg_win": final_metrics.get('avg_win', 0),
-            "avg_loss": final_metrics.get('avg_loss', 0),
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
             "profit_factor": profit_factor_value,
             "profit_factor_is_infinite": profit_factor_is_infinite,
-            "sharpe_ratio": self.calculate_sharpe_ratio()
+            "sharpe_ratio": self.calculate_sharpe_ratio(),
+            "avg_trade_pnl": avg_trade_pnl,
+            "avg_holding_days": avg_holding_days
         }
         
         # Prepare enhanced data for frontend
@@ -1116,6 +1356,9 @@ class EnhancedMomentumBacktester:
             trade_dict['trade_number'] = i
             trades_data.append(trade_dict)
         
+        # Prepare entry rows
+        entries_data = list(self.entry_events)
+        
         # Prepare highlights for frontend
         highlights_data = [highlight.to_dict() for highlight in self.highlight_periods]
         
@@ -1128,6 +1371,7 @@ class EnhancedMomentumBacktester:
             # Echo supplemental fields for the aggregator
             "bars_loaded": len(price_data),
             "trades": trades_data,
+            "entries": entries_data,
             "price_data": price_data,
             "momentum_periods": highlights_data,
             "market_events": [event.to_dict() for event in self.market_events],

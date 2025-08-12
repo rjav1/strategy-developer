@@ -141,6 +141,7 @@ async def run_momentum_backtest(request: BacktestRequest):
                 "profit_factor": round(safe_extract(metrics.get("profit_factor", 0)), 2)
             },
             "trades": make_json_serializable(results.get("trades", [])),
+            "entries": make_json_serializable(results.get("entries", [])),
             "price_data": make_json_serializable(results.get("price_data", [])),
             "momentum_periods": make_json_serializable(results.get("momentum_periods", [])),
             "buy_signals": buy_signals,
@@ -212,6 +213,7 @@ async def stream_momentum_backtest(request: BacktestRequest):
                     "profit_factor": round(safe_extract(metrics.get("profit_factor", 0)), 2)
                 },
                 "trades": make_json_serializable(results.get("trades", [])),
+                "entries": make_json_serializable(results.get("entries", [])),
                 "price_data": make_json_serializable(results.get("price_data", [])),
                 "momentum_periods": make_json_serializable(results.get("momentum_periods", [])),
                 "buy_signals": buy_signals,
@@ -507,7 +509,8 @@ async def _process_multi_symbol_backtest(job_id: str, symbols: list, period: str
                         "status": status,
                         "results": trade_stats, 
                         "error": results.get("error"),
-                        "trades": results.get("trades", [])
+                        "trades": results.get("trades", []),
+                        "entries": results.get("entries", [])
                     })
                     # Update running portfolio capital by adding this symbol's P&L
                     running_portfolio_capital += float(trade_stats.get("total_pnl", 0) or 0)
