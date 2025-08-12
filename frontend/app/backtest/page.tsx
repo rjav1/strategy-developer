@@ -62,6 +62,9 @@ export default function BacktestEngine() {
   const [period, setPeriod] = useState('1y')
   const [customMonths, setCustomMonths] = useState(12) // For custom period selection
   const [useCustomPeriod, setUseCustomPeriod] = useState(false)
+  const [useCustomDateRange, setUseCustomDateRange] = useState(false)
+  const [startDate, setStartDate] = useState('') // MM/DD/YY
+  const [endDate, setEndDate] = useState('')   // MM/DD/YY
   const [backtestType, setBacktestType] = useState<'single' | 'multi'>('single')
   const [selectedTickerForBacktest, setSelectedTickerForBacktest] = useState('')
   const [liveResults, setLiveResults] = useState<any>(null)
@@ -223,7 +226,7 @@ export default function BacktestEngine() {
     }
 
     try {
-      // Determine the period to use
+      // Determine the period or date range to use
       const finalPeriod = useCustomPeriod ? `${customMonths}mo` : period
 
       // Start backtest with progress tracking
@@ -235,7 +238,9 @@ export default function BacktestEngine() {
         body: JSON.stringify({
           ticker,
           period: finalPeriod,
-          initial_capital: initialCapital
+          initial_capital: initialCapital,
+          start_date: useCustomDateRange && startDate ? startDate : undefined,
+          end_date: useCustomDateRange && endDate ? endDate : undefined
         })
       })
 
@@ -383,7 +388,9 @@ export default function BacktestEngine() {
         body: JSON.stringify({
           symbols,
           period: finalPeriod,
-          initial_capital: initialCapital
+          initial_capital: initialCapital,
+          start_date: useCustomDateRange && startDate ? startDate : undefined,
+          end_date: useCustomDateRange && endDate ? endDate : undefined
         })
       })
 
@@ -858,8 +865,8 @@ export default function BacktestEngine() {
                   <input
                     type="radio"
                     id="preset-period"
-                    checked={!useCustomPeriod}
-                    onChange={() => setUseCustomPeriod(false)}
+                    checked={!useCustomPeriod && !useCustomDateRange}
+                    onChange={() => { setUseCustomPeriod(false); setUseCustomDateRange(false) }}
                     className="text-purple-500"
                   />
                   <label htmlFor="preset-period" className="text-sm text-white">Preset Periods</label>
@@ -888,7 +895,7 @@ export default function BacktestEngine() {
                     type="radio"
                     id="custom-period"
                     checked={useCustomPeriod}
-                    onChange={() => setUseCustomPeriod(true)}
+                    onChange={() => { setUseCustomPeriod(true); setUseCustomDateRange(false) }}
                     className="text-purple-500"
                   />
                   <label htmlFor="custom-period" className="text-sm text-white">Custom Period</label>
@@ -908,6 +915,37 @@ export default function BacktestEngine() {
                     <span className="text-xs text-purple-400">
                       ({customMonths} month{customMonths !== 1 ? 's' : ''} of historical data)
                     </span>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    id="custom-date-range"
+                    checked={useCustomDateRange}
+                    onChange={() => { setUseCustomDateRange(true); setUseCustomPeriod(false) }}
+                    className="text-purple-500"
+                  />
+                  <label htmlFor="custom-date-range" className="text-sm text-white">Custom Date Range</label>
+                </div>
+
+                {useCustomDateRange && (
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="text"
+                      placeholder="MM/DD/YY"
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.target.value)}
+                      className="w-32 px-3 py-2 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white text-center"
+                    />
+                    <span className="text-sm text-muted-foreground">to</span>
+                    <input
+                      type="text"
+                      placeholder="MM/DD/YY"
+                      value={endDate}
+                      onChange={(e) => setEndDate(e.target.value)}
+                      className="w-32 px-3 py-2 bg-card/50 border border-white/10 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white text-center"
+                    />
                   </div>
                 )}
               </div>

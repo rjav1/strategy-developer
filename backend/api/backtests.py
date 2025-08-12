@@ -100,7 +100,19 @@ def _compute_cumulative_metrics(individual_results: dict, initial_capital: float
 async def run_momentum_backtest(request: BacktestRequest):
     try:
         from enhanced_backtest_strategy import EnhancedMomentumBacktester
-        backtester = EnhancedMomentumBacktester(ticker=request.ticker.upper(), period=request.period, initial_capital=request.initial_capital)
+        # Determine period or explicit date range
+        period_arg = request.period
+        if request.start_date and request.end_date:
+            # Normalize to YYYY-MM-DD for yfinance date range support
+            try:
+                start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                period_arg = f"{start_dt}:{end_dt}"
+            except Exception:
+                # Fallback to provided period if formatting invalid
+                period_arg = request.period
+
+        backtester = EnhancedMomentumBacktester(ticker=request.ticker.upper(), period=period_arg, initial_capital=request.initial_capital)
         if not await backtester.fetch_data():
             raise HTTPException(status_code=404, detail=f"Could not fetch data for ticker '{request.ticker}'")
         if not await backtester.run_simulation():
@@ -165,7 +177,17 @@ async def stream_momentum_backtest(request: BacktestRequest):
         try:
             from enhanced_backtest_strategy import EnhancedMomentumBacktester
             yield f"data: {json.dumps({'type': 'status', 'message': f'Starting backtest for {request.ticker}', 'progress': 0})}\n\n"
-            backtester = EnhancedMomentumBacktester(ticker=request.ticker.upper(), period=request.period, initial_capital=request.initial_capital)
+            # Determine period or explicit date range
+            period_arg = request.period
+            if request.start_date and request.end_date:
+                try:
+                    start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                    end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                    period_arg = f"{start_dt}:{end_dt}"
+                except Exception:
+                    period_arg = request.period
+
+            backtester = EnhancedMomentumBacktester(ticker=request.ticker.upper(), period=period_arg, initial_capital=request.initial_capital)
             yield f"data: {json.dumps({'type': 'status', 'message': 'Fetching market data...', 'progress': 10})}\n\n"
             if not await backtester.fetch_data():
                 yield f"data: {json.dumps({'type': 'error', 'message': f'Could not fetch data for ticker {request.ticker}'})}\n\n"
@@ -246,6 +268,8 @@ async def start_momentum_backtest_with_progress(request: BacktestRequest):
         "created_at": datetime.now().isoformat(),
         "ticker": request.ticker,
         "period": request.period,
+        "start_date": request.start_date,
+        "end_date": request.end_date,
         "initial_capital": request.initial_capital
     }
     asyncio.create_task(_run_background_backtest(job_id, request))
@@ -256,7 +280,17 @@ async def _run_background_backtest(job_id: str, request: BacktestRequest):
     try:
         from enhanced_backtest_strategy import EnhancedMomentumBacktester
         backtest_results[job_id].update({"status": "fetching_data", "progress": 5, "message": "Fetching market data..."})
-        backtester = EnhancedMomentumBacktester(ticker=request.ticker.upper(), period=request.period, initial_capital=request.initial_capital)
+        # Determine period or explicit date range
+        period_arg = request.period
+        if request.start_date and request.end_date:
+            try:
+                start_dt = datetime.strptime(request.start_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                end_dt = datetime.strptime(request.end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                period_arg = f"{start_dt}:{end_dt}"
+            except Exception:
+                period_arg = request.period
+
+        backtester = EnhancedMomentumBacktester(ticker=request.ticker.upper(), period=period_arg, initial_capital=request.initial_capital)
         if not await backtester.fetch_data():
             backtest_results[job_id].update({"status": "error", "message": f"Could not fetch data for ticker {request.ticker}"})
             return
@@ -290,6 +324,16 @@ async def run_multi_symbol_backtest(request: dict):
     try:
         symbols = request.get("symbols")
         period = request.get("period", "1y")
+        # Optional explicit date range support
+        start_date = request.get("start_date")
+        end_date = request.get("end_date")
+        if start_date and end_date:
+            try:
+                start_dt = datetime.strptime(start_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                end_dt = datetime.strptime(end_date, "%m/%d/%y").strftime("%Y-%m-%d")
+                period = f"{start_dt}:{end_dt}"
+            except Exception:
+                pass
         initial_capital = request.get("initial_capital", 10000.0)
 
         # If no symbols provided, default to full market list (same behavior as screener)

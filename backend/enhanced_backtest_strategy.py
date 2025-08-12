@@ -58,7 +58,11 @@ except ImportError as e:
     PRODUCTION_SCREENER_AVAILABLE = False
 
 def fetch_ohlcv(symbol: str, period_str: str) -> pd.DataFrame:
-    """Fetch OHLCV data using yfinance with enhanced data preparation and timeout protection"""
+    """Fetch OHLCV data using yfinance with enhanced data preparation and timeout protection.
+
+    period_str supports standard yfinance periods like '1y', '6mo', etc., and explicit
+    date ranges in the format 'YYYY-MM-DD:YYYY-MM-DD'.
+    """
     import concurrent.futures
     
     def _fetch_data_inner():
@@ -69,9 +73,28 @@ def fetch_ohlcv(symbol: str, period_str: str) -> pd.DataFrame:
             print(f"🔧 DEBUG fetch_ohlcv: Creating yf.Ticker({symbol})")
             ticker = yf.Ticker(symbol)
             
-            print(f"🔧 DEBUG fetch_ohlcv: Calling ticker.history(period={period_str}, timeout=15)")
-            # Add timeout parameter to prevent hanging
-            data = ticker.history(period=period_str, timeout=15)
+            # Support explicit date range "YYYY-MM-DD:YYYY-MM-DD"
+            start_arg = None
+            end_arg = None
+            if isinstance(period_str, str) and ":" in period_str and len(period_str.split(":")) == 2:
+                try:
+                    start_candidate, end_candidate = period_str.split(":")
+                    # Basic validation; yfinance accepts strings in YYYY-MM-DD
+                    datetime.strptime(start_candidate, "%Y-%m-%d")
+                    datetime.strptime(end_candidate, "%Y-%m-%d")
+                    start_arg = start_candidate
+                    end_arg = end_candidate
+                except Exception:
+                    start_arg = None
+                    end_arg = None
+
+            if start_arg and end_arg:
+                print(f"🔧 DEBUG fetch_ohlcv: Calling ticker.history(start={start_arg}, end={end_arg}, timeout=15)")
+                data = ticker.history(start=start_arg, end=end_arg, timeout=15)
+            else:
+                print(f"🔧 DEBUG fetch_ohlcv: Calling ticker.history(period={period_str}, timeout=15)")
+                # Add timeout parameter to prevent hanging
+                data = ticker.history(period=period_str, timeout=15)
             
             print(f"🔧 DEBUG fetch_ohlcv: Raw data shape: {data.shape if not data.empty else 'EMPTY'}")
             

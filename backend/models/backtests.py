@@ -6,6 +6,9 @@ class BacktestRequest(BaseModel):
     ticker: str
     period: str = "1y"
     initial_capital: float = 10000.0
+    # Optional explicit date range. If provided, backend should prioritize these over period
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
 
 
 class BacktestConfig(BaseModel):

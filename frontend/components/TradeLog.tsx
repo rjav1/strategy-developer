@@ -9,7 +9,8 @@ import {
   Clock,
   Filter,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Download
 } from 'lucide-react'
 
 interface Trade {
@@ -126,6 +127,67 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
   const closedTrades = trades.filter(t => t.status === 'closed').length
   const totalPnL = trades.reduce((sum, trade) => sum + (trade.pnl || 0), 0)
 
+  const exportTradesCsv = () => {
+    if (!sortedTrades || sortedTrades.length === 0) return
+    const hasSymbol = trades.some(t => !!(t as any).symbol)
+    const header = [
+      hasSymbol ? 'Symbol' : null,
+      'Type',
+      'Status',
+      'Entry Date',
+      'Entry Price',
+      'Exit Date',
+      'Exit Price',
+      'Shares',
+      '$ Size',
+      'Stop Loss',
+      'Risk Amount',
+      'Risk %',
+      'Hold Days',
+      'P&L',
+      'P&L %',
+      'Exit Reason'
+    ].filter(Boolean) as string[]
+
+    const rows = sortedTrades.map(t => {
+      const size = (t.shares || 0) * (t.exit_price || t.entry_price || 0)
+      const vals = [
+        hasSymbol ? ((t as any).symbol || '') : null,
+        t.type === 'entry' ? 'Entry' : (t.exit_reason && t.exit_reason.toLowerCase().startsWith('trim') ? 'Trim' : (t.status === 'open' ? 'Open' : 'Closed')),
+        t.status,
+        t.entry_date || '',
+        (t.entry_price ?? '') as any,
+        t.exit_date || '',
+        (t.exit_price ?? '') as any,
+        (t.shares ?? '') as any,
+        size || '',
+        (t.stop_loss ?? '') as any,
+        (t.risk_amount ?? '') as any,
+        (typeof t.risk_percentage === 'number' ? t.risk_percentage.toFixed(2) : '') as any,
+        (t.holding_period ?? '') as any,
+        (t.pnl ?? '') as any,
+        (typeof (t as any).pnl_percent === 'number' ? (t as any).pnl_percent.toFixed(2) : '') as any,
+        (t.exit_reason || (t.type === 'entry' ? 'Buy' : ''))
+      ].filter(v => v !== null)
+      return vals
+    })
+
+    const csv = [header, ...rows].map(r => r.map(val => {
+      const s = String(val)
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s
+    }).join(',')).join('\n')
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${ticker.replace(/\s+/g, '_')}_trade_log_${new Date().toISOString().split('T')[0]}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -151,6 +213,13 @@ export default function TradeLog({ trades, ticker }: TradeLogProps) {
               {formatCurrency(totalPnL)}
             </span>
           </div>
+          <button
+            onClick={exportTradesCsv}
+            className="flex items-center gap-2 px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm"
+          >
+            <Download className="h-4 w-4" />
+            Download CSV
+          </button>
         </div>
       </div>
 
