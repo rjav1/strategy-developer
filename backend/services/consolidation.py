@@ -121,6 +121,18 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
     stability_threshold = adr_20 if adr_20 is not None else consolidation_avg_adr
     price_criterion_met = price_difference_adr <= stability_threshold
 
+    # NEW RULE: All closes in consolidation must be above 50-day SMA; if SMA50 missing, treat as failure
+    try:
+        sma50_series = df['SMA50'] if 'SMA50' in df.columns else None
+        if sma50_series is not None and len(actual_consolidation_data) > 0:
+            closes = actual_consolidation_data['Close']
+            sma50_subset = sma50_series.iloc[consolidation_start_idx:consolidation_start_idx + actual_consolidation_end + 1]
+            sma50_ok = bool((closes > sma50_subset).all()) if len(sma50_subset) == len(closes) else False
+        else:
+            sma50_ok = False
+    except Exception:
+        sma50_ok = False
+
     consolidation_found = (
         len(actual_consolidation_data) >= 3 and
         first_candle_criterion_met and
@@ -128,7 +140,8 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         volume_criterion_met and
         range_criterion_met and
         price_criterion_met and
-        price_floor_criterion_met
+        price_floor_criterion_met and
+        sma50_ok
     )
 
     consolidation_details = {
@@ -153,6 +166,7 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
         'min_consolidation_close': round(min_consolidation_close, 2),
         'min_close_pct_of_start': round(min_close_pct_of_start, 2),
         'price_floor_criterion_met': price_floor_criterion_met,
+        'sma50_all_closes_above': sma50_ok,
         'stability_threshold': round(stability_threshold, 2),
         'adr_20_used': adr_20 is not None,
         'first_consolidation_close': round(first_consolidation_close, 2),
@@ -162,7 +176,8 @@ def detect_consolidation_pattern_new(df: pd.DataFrame, move_start_idx: int, move
             f"first candle ADR {first_consolidation_adr:.1f}% vs move start {move_start_adr:.1f}%, "
             f"rolling validation {'PASSED' if rolling_validation_passed else 'FAILED'}, volume {consolidation_avg_volume:.0f} vs {move_avg_volume:.0f}, "
             f"ADR {consolidation_avg_adr:.1f}% vs {move_avg_adr:.1f}% (excluding first candle), close diff {price_difference_adr:.1f}% (≤{stability_threshold:.1f}%), "
-            f"price floor {'PASSED' if price_floor_criterion_met else 'FAILED'} (start: ${first_consolidation_close:.2f}, floor: ${first_consolidation_close * 0.8:.2f}, lowest: ${min_consolidation_close:.2f})"
+            f"price floor {'PASSED' if price_floor_criterion_met else 'FAILED'} (start: ${first_consolidation_close:.2f}, floor: ${first_consolidation_close * 0.8:.2f}, lowest: ${min_consolidation_close:.2f}), "
+            f"SMA50 rule {'PASSED' if sma50_ok else 'FAILED'}"
         )
     }
 

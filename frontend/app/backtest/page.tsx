@@ -1164,6 +1164,8 @@ export default function BacktestEngine() {
                   trades={backtestResult?.trades || []}
                   momentumPeriods={backtestResult?.momentum_periods || []}
                   ticker={selectedTickerForBacktest}
+                  // @ts-ignore: optional prop for overlay lines
+                  trendlines={(backtestResult as any)?.trendlines || []}
                 />
               </>
             )

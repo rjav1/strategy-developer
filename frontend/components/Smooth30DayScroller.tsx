@@ -52,6 +52,7 @@ interface Smooth30DayScrollerProps {
   ticker: string
   isLoading?: boolean
   initialWindowDays?: number
+  trendlines?: { start_date: string; end_date: string; y0: number; y1: number; method?: string; context?: string }[]
 }
 
 interface ViewportState {
@@ -80,7 +81,8 @@ export default function Smooth30DayScroller({
   momentumPeriods, 
   ticker,
   isLoading = false,
-  initialWindowDays
+  initialWindowDays,
+  trendlines = []
 }: Smooth30DayScrollerProps) {
   
   // Debug: Log all incoming data with extensive details
@@ -878,6 +880,30 @@ export default function Smooth30DayScroller({
         yaxis: 'y',
         showlegend: false,
         hovertemplate: 'SMA50: $%{y:.2f}<extra></extra>'
+      })
+    }
+
+    // NEW: Render booster trendlines (downward channel/line used for entry)
+    if (trendlines && trendlines.length > 0) {
+      const windowStartStr = new Date(windowBounds.startDate).toISOString()
+      const windowEndStr = new Date(windowBounds.endDate).toISOString()
+      trendlines.forEach((tl, idx) => {
+        // Clip to current window
+        const x0 = new Date(tl.start_date).toISOString()
+        const x1 = new Date(tl.end_date).toISOString()
+        if (x1 < windowStartStr || x0 > windowEndStr) return
+        data.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: [tl.start_date, tl.end_date],
+          y: [tl.y0, tl.y1],
+          line: { color: '#60a5fa', width: 2, dash: (tl.method === 'pivot' ? 'dot' : 'dash') },
+          name: `Trendline (${tl.method || 'reg'})`,
+          hovertemplate: `<b>Trendline</b><br>${tl.method || 'regression'}<extra></extra>`,
+          xaxis: 'x',
+          yaxis: 'y',
+          showlegend: false
+        })
       })
     }
     

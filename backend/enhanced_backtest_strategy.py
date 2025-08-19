@@ -298,6 +298,12 @@ class EnhancedMomentumBacktester:
         self.market_events: List[MarketEvent] = []
         self.backtest_frames: List[BacktestFrame] = []
         
+        # NEW: trendline overlays for visualization
+        # Each item: {start_date, end_date, y0, y1, method, context, symbol}
+        self.trendlines: List[Dict[str, Any]] = []
+        # Last computed line to attach to the next BUY event
+        self.last_trendline: Optional[Dict[str, Any]] = None
+        
         # Current detected patterns
         self.current_momentum_period: Optional[HighlightPeriod] = None
         self.current_consolidation_period: Optional[HighlightPeriod] = None
@@ -523,6 +529,11 @@ class EnhancedMomentumBacktester:
         - Require breakout candle to close in the upper portion of its range (close-location-value >= 0.6).
         - Strengthen volume confirmation: breakout volume >= 1.5x 20-day average and also above
           the average consolidation volume when available.
+        - NEW: Allow breakouts of a downward channel formed during consolidation (no new highs required).
+          We detect a descending channel by fitting linear regressions to the consolidation highs and lows
+          and require the close to break above the channel's upper regression line with volume confirmation.
+        - NEW: If consolidation detection is not available, fall back to a recent-window (last 12 bars)
+          downward-channel detection so entries are not missed in MOMENTUM_DETECTED state.
         These retain the overall strategy format and do not hardcode any symbol.
         """
         if self.state != TradingState.CONSOLIDATION:
@@ -605,7 +616,9 @@ class EnhancedMomentumBacktester:
             "date": current_date.date().isoformat()
         }, "backtest")
         
-        # Get consolidation high from momentum screener results (EXCLUDING current day)
+        # Get consolidation high and data from momentum screener results (EXCLUDING current day)
+        consolidation_avg_volume = None
+        channel_info = None
         if consolidation_high is None:
             # Use the screener's consolidation detection to get the range, but exclude current day
             lookback_data = self.daily_data.iloc[:current_idx]  # EXCLUDE current day
@@ -633,33 +646,66 @@ class EnhancedMomentumBacktester:
                             "consol_end_idx": consol_end_idx,
                             "date": current_date.date().isoformat()
                         }, "backtest")
+                        # NEW: analyze potential downward channel inside consolidation window
+                        try:
+                            if len(consol_data) >= 5:
+                                idx = np.arange(0, len(consol_data))
+                                highs = consol_data['High'].values.astype(float)
+                                lows = consol_data['Low'].values.astype(float)
+                                # Fit simple linear regression to highs and lows
+                                slope_h, intercept_h = np.polyfit(idx, highs, 1)
+                                slope_l, intercept_l = np.polyfit(idx, lows, 1)
+                                def _r2(y, yhat):
+                                    ss_res = float(np.sum((y - yhat) ** 2))
+                                    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+                                    return 0.0 if ss_tot == 0 else 1.0 - ss_res / ss_tot
+                                r2_h = _r2(highs, slope_h * idx + intercept_h)
+                                r2_l = _r2(lows, slope_l * idx + intercept_l)
+                                avg_price = float(consol_data['Close'].mean()) if len(consol_data) > 0 else float(current_close)
+                                slope_pct_per_bar = (slope_h / max(avg_price, 1e-6))
+                                # Define a descending channel if both boundaries slope down with modest fit quality
+                                is_descending = (slope_h < 0 and slope_l < 0)
+                                slope_down_enough = (slope_pct_per_bar <= -0.001)  # ~-0.1% per bar
+                                fit_ok = (r2_h > 0.2 or r2_l > 0.2)
+                                upper_at_end = float(slope_h * idx[-1] + intercept_h)
+                                channel_info = {
+                                    'found': bool(is_descending and slope_down_enough and fit_ok),
+                                    'type': 'downward',
+                                    'upper_at_end': upper_at_end,
+                                    'slope_high': float(slope_h),
+                                    'slope_low': float(slope_l),
+                                    'r2_high': float(r2_h),
+                                    'r2_low': float(r2_l)
+                                }
+                                log_info(f"📐 Channel analysis: found={channel_info['found']}, type=downward, upper_at_end=${upper_at_end:.2f}, r2_h={r2_h:.2f}, r2_l={r2_l:.2f}", {
+                                    "ticker": self.ticker,
+                                    "found": channel_info['found'],
+                                    "upper_at_end": upper_at_end,
+                                    "r2_high": r2_h,
+                                    "r2_low": r2_l,
+                                    "date": current_date.date().isoformat()
+                                }, "backtest")
+                        except Exception:
+                            channel_info = None
             except Exception as e:
-                log_warn(f"⚠️ Error getting consolidation high: {e}", {
+                log_warn(f"⚠️ Error getting consolidation details: {e}", {
                     "ticker": self.ticker,
                     "error": str(e)
                 }, "backtest")
                 return False
         
         if consolidation_high is None:
-            log_warn(f"❌ No consolidation high found for {current_date.date()}", {
-                "ticker": self.ticker,
-                "date": current_date.date().isoformat()
-            }, "backtest")
+            log_warn(f"❌ No consolidation details available (strict mode)", {"ticker": self.ticker, "date": current_date.date().isoformat()}, "backtest")
             return False
         
         # Calculate 20-day average volume
         avg_volume_20 = self.daily_data.iloc[max(0, current_idx-20):current_idx]['Volume'].mean()
-        consolidation_avg_volume_local = None
-        try:
-            # Best-effort recover from local scope above (if present)
-            consolidation_avg_volume_local = locals().get('consolidation_avg_volume', None)
-        except Exception:
-            consolidation_avg_volume_local = None
+        consolidation_avg_volume_local = consolidation_avg_volume
         
         # Entry conditions baseline: CLOSE above consolidation high
         breakout = current_close > consolidation_high
         
-        # Enhanced quality rules
+        # Enhanced quality rules (for classic high breakout)
         breakout_margin_ok = ((current_close - consolidation_high) / consolidation_high * 100) >= 0.35 if consolidation_high > 0 else False
         day_range = max(1e-9, current_row['High'] - current_row['Low'])
         close_location_value = (current_row['Close'] - current_row['Low']) / day_range  # 0..1
@@ -671,6 +717,15 @@ class EnhancedMomentumBacktester:
         volume_vs_consolidation = True if consolidation_avg_volume_local in (None, 0) else current_volume > consolidation_avg_volume_local
         volume_confirmation = volume_vs_avg and volume_vs_consolidation
 
+        # NEW: More permissive volume rule for channel breakouts
+        channel_volume_ok = (
+            (vol_ratio >= 1.1)  # at least 10% above 20-day average
+            or (
+                consolidation_avg_volume_local not in (None, 0)
+                and current_volume >= consolidation_avg_volume_local * 1.15  # or 15% above consolidation average
+            )
+        )
+        
         # Intraday breakout allowance: if intraday high clears consolidation high decisively and closes strong with big volume
         intraday_breakout = (
             (current_row['High'] >= consolidation_high * 1.003) and  # 0.3% poke above
@@ -678,7 +733,15 @@ class EnhancedMomentumBacktester:
             (vol_ratio >= 1.5)
         )
         
-        log_info(f"🎯 Buy Signal Check {current_date.date()}: Close={current_close:.2f} vs Consol={consolidation_high:.2f}, Vol={current_volume:.0f} vs Avg20={avg_volume_20:.0f}", {
+        # NEW: Downward-channel breakout (no new highs required)
+        channel_breakout = False
+        if channel_info and channel_info.get('found', False):
+            channel_margin = 0.0025  # ~0.25%
+            upper_line = float(channel_info.get('upper_at_end', 0.0))
+            if upper_line > 0:
+                channel_breakout = (current_close > upper_line * (1.0 + channel_margin))
+        
+        log_info(f"🎯 Buy Check {current_date.date()}: Close={current_close:.2f} ConsolHigh={consolidation_high:.2f} Vol={current_volume:.0f} Avg20={avg_volume_20:.0f} ChannelBreakout={channel_breakout}", {
             "ticker": self.ticker,
             "current_close": current_close,
             "consolidation_high": consolidation_high,
@@ -689,14 +752,18 @@ class EnhancedMomentumBacktester:
             "breakout_margin_ok": breakout_margin_ok,
             "close_near_high": close_near_high,
             "volume_confirmation": volume_confirmation,
+            "channel_volume_ok": channel_volume_ok,
+            "channel_breakout": channel_breakout,
             "date": current_date.date().isoformat()
         }, "backtest")
-        log_info(f"   Breakout: {breakout}, MarginOK: {breakout_margin_ok}, CloseNearHigh: {close_near_high}, VolOK: {volume_confirmation}", {
+        log_info(f"   Classic: {breakout and breakout_margin_ok and close_near_high and volume_confirmation} | Intraday: {intraday_breakout} | Channel: {channel_breakout and channel_volume_ok}", {
             "ticker": self.ticker,
             "is_breakout": breakout,
             "margin_ok": breakout_margin_ok,
             "close_near_high": close_near_high,
             "has_volume": volume_confirmation,
+            "channel_volume_ok": channel_volume_ok,
+            "channel_breakout": channel_breakout,
             "date": current_date.date().isoformat()
         }, "backtest")
         
@@ -708,15 +775,21 @@ class EnhancedMomentumBacktester:
 
         # Proximity override for SMA50: within 2% below SMA50 with strong structure + volume
         near_sma50_override = (
-            (current_close >= sma50 * 0.98) and structure_ok and (breakout or intraday_breakout) and (vol_ratio >= 1.6) and volume_vs_consolidation
+            (current_close >= sma50 * 0.98) and structure_ok and (breakout or intraday_breakout or channel_breakout) and (vol_ratio >= 1.6) and volume_vs_consolidation
         )
 
-        # ALL criteria must be met: price above SMA50 + ADR in range + breakout + volume + quality filters
+        # ALL criteria must be met for any allowed entry path
         all_criteria_met = (
+            # Original: new-high breakout
             (price_above_sma50 and adr_in_range and breakout and breakout_margin_ok and close_near_high and volume_confirmation)
+            # Low ADR override
             or adr_low_override
+            # Intraday poke + strong structure
             or (price_above_sma50 and adr_in_range and intraday_breakout and structure_ok)
+            # Near SMA50 override for classic/intraday
             or (near_sma50_override and adr_in_range)
+            # NEW: Downward-channel breakout path
+            or (price_above_sma50 and adr_in_range and channel_breakout and channel_volume_ok and structure_ok)
         )
         
         if all_criteria_met:
@@ -725,6 +798,7 @@ class EnhancedMomentumBacktester:
                 "price_above_sma50": price_above_sma50,
                 "adr_in_range": adr_in_range,
                 "breakout": breakout,
+                "channel_breakout": channel_breakout,
                 "volume_confirmation": volume_confirmation,
                 "date": current_date.date().isoformat()
             }, "backtest")
@@ -734,11 +808,150 @@ class EnhancedMomentumBacktester:
                 "price_above_sma50": price_above_sma50,
                 "adr_in_range": adr_in_range,
                 "breakout": breakout,
+                "channel_breakout": channel_breakout,
                 "volume_confirmation": volume_confirmation,
                 "date": current_date.date().isoformat()
             }, "backtest")
         
         return all_criteria_met
+    
+    def check_trendline_breakout_booster(self, current_date: datetime, current_row: pd.Series) -> bool:
+        """Strict NOT_IN_TRADE booster: allow a buy on a decisive downward-channel breakout with VERY strong volume.
+
+        Guards:
+        - State must be NOT_IN_TRADE
+        - Price > SMA50; ADR_20 in [3,20]; SMA20 rising vs 5 bars ago
+        - Recent window forms a descending channel; today closes > upper line by ~0.25% and closes strong
+        - Volume >=2x 20-day OR >=2x recent average
+        - Yesterday's close was not already above the line
+        """
+        if self.state != TradingState.NOT_IN_TRADE:
+            return False
+        current_idx = self.daily_data.index.get_loc(current_date)
+        if current_idx <= 20:
+            return False
+        current_close = float(current_row['Close'])
+        current_volume = float(current_row['Volume'])
+        sma50 = self.daily_data.iloc[current_idx].get('SMA50', np.nan)
+        adr20 = self.daily_data.iloc[current_idx].get('ADR_20', np.nan)
+        sma20_now = self.daily_data.iloc[current_idx].get('SMA20', np.nan)
+        sma20_prev = self.daily_data.iloc[max(0, current_idx-5)].get('SMA20', np.nan)
+        if pd.isna(sma50) or pd.isna(adr20) or pd.isna(sma20_now) or pd.isna(sma20_prev):
+            return False
+        if not (current_close > float(sma50)):
+            return False
+        if not (3.0 <= float(adr20) <= 20.0):
+            return False
+        if not (float(sma20_now) > float(sma20_prev)):
+            return False
+        recent_window = 18
+        start_idx = max(0, current_idx - recent_window)
+        recent = self.daily_data.iloc[start_idx:current_idx]
+        if len(recent) < 8:
+            return False
+        idx = np.arange(len(recent))
+        highs = recent['High'].values.astype(float)
+        lows = recent['Low'].values.astype(float)
+        try:
+            slope_h, intercept_h = np.polyfit(idx, highs, 1)
+            slope_l, intercept_l = np.polyfit(idx, lows, 1)
+        except Exception:
+            return False
+        def _r2(y, yhat):
+            ss_res = float(np.sum((y - yhat) ** 2))
+            ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+            return 0.0 if ss_tot == 0 else 1.0 - ss_res / ss_tot
+        r2_h = _r2(highs, slope_h * idx + intercept_h)
+        r2_l = _r2(lows, slope_l * idx + intercept_l)
+        avg_price = float(recent['Close'].mean())
+        slope_pct_per_bar = (slope_h / max(avg_price, 1e-6))
+        is_descending = (slope_h < 0 and slope_l < 0)
+        slope_down_enough = (slope_pct_per_bar <= -0.001)
+        fit_ok = (r2_h >= 0.5 or r2_l >= 0.5)
+        upper_at_end = float(slope_h * (len(recent) - 1) + intercept_h)
+        method = "regression"
+        if not (is_descending and slope_down_enough and fit_ok and upper_at_end > 0):
+            # Fallback: pivot-based trendline using last two swing highs within the recent window
+            method = "pivot"
+            pivot_indices = []
+            for i in range(1, len(recent) - 1):
+                if highs[i] > highs[i - 1] and highs[i] > highs[i + 1]:
+                    pivot_indices.append(i)
+            if len(pivot_indices) >= 2:
+                p2 = pivot_indices[-1]
+                # choose the last prior pivot that is at least 3 bars before and higher than p2
+                p1_candidates = [p for p in pivot_indices[:-1] if p <= p2 - 3 and highs[p] > highs[p2]]
+                if len(p1_candidates) > 0:
+                    p1 = p1_candidates[-1]
+                    x1, y1 = float(p1), float(highs[p1])
+                    x2, y2 = float(p2), float(highs[p2])
+                    slope_h = (y2 - y1) / max((x2 - x1), 1e-6)
+                    intercept_h = y1 - slope_h * x1
+                    upper_at_end = float(slope_h * (len(recent) - 1) + intercept_h)
+                    is_descending = y2 < y1
+                    fit_ok = True
+                    slope_pct_per_bar = (slope_h / max(avg_price, 1e-6))
+                else:
+                    log_info(
+                        f"❌ Booster: no valid lower-high pivots for trendline in window ending {current_date.date()}",
+                        {"ticker": self.ticker},
+                        "backtest",
+                    )
+                    return False
+            else:
+                log_info(
+                    f"❌ Booster: insufficient pivot highs for trendline in window ending {current_date.date()}",
+                    {"ticker": self.ticker},
+                    "backtest",
+                )
+                return False
+            if not (is_descending and upper_at_end > 0):
+                log_info(
+                    f"❌ Booster: pivot trendline not descending or invalid on {current_date.date()}",
+                    {"ticker": self.ticker},
+                    "backtest",
+                )
+                return False
+        # Save last computed trendline for visualization
+        try:
+            end_idx = len(recent) - 1
+            start_date = self.daily_data.index[start_idx]
+            end_date = self.daily_data.index[current_idx - 1]
+            y0 = float(slope_h * 0 + intercept_h)
+            y1 = float(slope_h * end_idx + intercept_h)
+            self.last_trendline = {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "y0": y0,
+                "y1": y1,
+                "method": method,
+                "context": "booster",
+                "symbol": self.ticker,
+            }
+        except Exception:
+            self.last_trendline = None
+        prev_close = float(self.daily_data.iloc[current_idx-1]['Close'])
+        channel_margin = 0.0025
+        if prev_close > upper_at_end * (1.0 + channel_margin):
+            return False
+        day_range = max(1e-9, float(current_row['High']) - float(current_row['Low']))
+        close_location_value = (float(current_row['Close']) - float(current_row['Low'])) / day_range
+        close_near_high = close_location_value >= 0.6
+        above_line = current_close > upper_at_end * (1.0 + channel_margin)
+        avg_vol_20 = float(self.daily_data.iloc[max(0, current_idx-20):current_idx]['Volume'].mean())
+        recent_avg_vol = float(recent['Volume'].mean()) if len(recent) > 0 else avg_vol_20
+        vol_ratio = (current_volume / avg_vol_20) if avg_vol_20 > 0 else 0.0
+        channel_volume_strict = (vol_ratio >= 2.0) or (recent_avg_vol > 0 and current_volume >= recent_avg_vol * 2.0)
+        log_info(
+            f"🎯 Booster Check {current_date.date()}: close={current_close:.2f} upper_line={upper_at_end:.2f} vol={current_volume:.0f} avg20={avg_vol_20:.0f}",
+            {"ticker": self.ticker, "method": method, "above_line": above_line, "close_near_high": close_near_high, "vol_ratio": vol_ratio, "channel_volume_strict": channel_volume_strict, "r2_high": r2_h, "r2_low": r2_l},
+            "backtest",
+        )
+        passed = bool(above_line and close_near_high and channel_volume_strict)
+        # If it passes, persist the trendline overlay for the frontend
+        if passed and self.last_trendline:
+            self.trendlines.append(self.last_trendline)
+        return passed
     
     def check_sell_signal(self, current_date: datetime, current_row: pd.Series) -> Tuple[bool, str]:
         """Check for sell signal when in IN_POSITION state - close below dynamic stop OR 20-day SMA (whichever higher)"""
@@ -845,7 +1058,8 @@ class EnhancedMomentumBacktester:
                 'risk_percentage': risk_percentage,
                 'risk_per_share': risk_per_share,
                 'portfolio_value': equity,
-                'capital_after': self.current_capital
+                'capital_after': self.current_capital,
+                'trendline': self.last_trendline
             }
         )
         
@@ -1128,6 +1342,20 @@ class EnhancedMomentumBacktester:
                         "date": current_date.date().isoformat()
                     }, "backtest")
                     await asyncio.sleep(0)  # Yield control to event loop for real-time logging
+                else:
+                    # Strict booster: evaluate a decisive trendline breakout from NOT_IN_TRADE
+                    try:
+                        if self.check_trendline_breakout_booster(current_date, current_row):
+                            buy_event = self.execute_buy(current_date, current_row)
+                            daily_events.append(buy_event)
+                            log_info(
+                                f"🟢 BOOSTER BUY: Trendline breakout from NOT_IN_TRADE for {self.ticker} on {current_date.date()}",
+                                {"ticker": self.ticker, "event": "booster_buy", "date": current_date.date().isoformat()},
+                                "backtest",
+                            )
+                            await asyncio.sleep(0)
+                    except Exception:
+                        pass
             
             elif self.state == TradingState.MOMENTUM_DETECTED:
                 if not pattern_found or confidence < 60:
@@ -1159,6 +1387,19 @@ class EnhancedMomentumBacktester:
                                 "date": current_date.date().isoformat()
                             }, "backtest")
                             await asyncio.sleep(0)  # Yield control to event loop for real-time logging
+                            # NEW: Evaluate channel-breakout buy while still in momentum state
+                            try:
+                                if self.check_buy_signal(current_date, current_row):
+                                    buy_event = self.execute_buy(current_date, current_row)
+                                    daily_events.append(buy_event)
+                                    log_info(f"🟢 MOMENTUM BUY: Channel breakout during momentum for {self.ticker} on {current_date.date()}", {
+                                        "ticker": self.ticker,
+                                        "event": "momentum_channel_buy",
+                                        "date": current_date.date().isoformat()
+                                    }, "backtest")
+                                    await asyncio.sleep(0)
+                            except Exception:
+                                pass
             
             elif self.state == TradingState.CONSOLIDATION:
                 # Check if consolidation criteria are still met
@@ -1209,7 +1450,7 @@ class EnhancedMomentumBacktester:
                         await asyncio.sleep(0)  # Yield control to event loop for real-time logging
             
             elif self.state == TradingState.IN_POSITION:
-                # Progressive trims at 2R, 4R, 8R, ... (sell half and move stop to stepped levels)
+                # Progressive trims at 2R, 4R, 6R, 8R, ... (sell half and move stop to stepped levels)
                 try:
                     if self.enable_progressive_trims and self.current_trade is not None and self.initial_risk_per_share > 0:
                         threshold_price = self.current_trade.entry_price + self.initial_risk_per_share * self.next_trim_multiple
@@ -1220,8 +1461,9 @@ class EnhancedMomentumBacktester:
                             trim_event = self.execute_partial_sell(current_date, current_row, shares_to_sell, reason)
                             daily_events.append(trim_event)
                             
-                            # Step the numeric stop to previous multiple: after 2R -> BE, 4R -> 2R, 8R -> 4R, ...
-                            stepped_multiple = self.next_trim_multiple / 2.0
+                            # Step the numeric stop to (next_trim_multiple - 2R):
+                            # after 2R -> BE, 4R -> 2R, 6R -> 4R, 8R -> 6R, ...
+                            stepped_multiple = max(0.0, self.next_trim_multiple - 2.0)
                             if stepped_multiple <= 1.0:
                                 new_stop = self.current_trade.entry_price
                             else:
@@ -1242,8 +1484,8 @@ class EnhancedMomentumBacktester:
                                 "date": current_date.date().isoformat()
                             }, "backtest")
                             
-                            # Double the next threshold
-                            self.next_trim_multiple *= 2.0
+                            # Linear increment: next threshold increases by +2R each time
+                            self.next_trim_multiple += 2.0
                 except Exception:
                     pass
                 
@@ -1480,6 +1722,7 @@ class EnhancedMomentumBacktester:
             "price_data": price_data,
             "momentum_periods": highlights_data,
             "market_events": [event.to_dict() for event in self.market_events],
+            "trendlines": self.trendlines,
             "backtest_frames": [frame.to_dict() for frame in self.backtest_frames],
             "chart_path": chart_path,
             "ticker": self.ticker,
